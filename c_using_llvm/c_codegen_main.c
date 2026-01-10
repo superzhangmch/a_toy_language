@@ -3,7 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "ast.h"
-#include "codegen_c.h"
+#include "c_codegen.h"
 
 extern int yyparse();
 extern FILE *yyin;

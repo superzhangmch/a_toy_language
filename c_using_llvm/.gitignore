@@ -1,0 +1,17 @@
+# Object files
+*.o
+
+# Executables
+interpreter
+c_codegen
+codegen_llvm
+
+# Generated parser files
+core/tiny.tab.c
+core/tiny.tab.h
+core/lex.yy.c
+
+# Other build artifacts
+a.out
+runtime.o
+*.dSYM/

@@ -2,7 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
-#include "codegen_c.h"
+#include "c_codegen.h"
 #include "ast.h"
 
 static void emit(CCodeGen *gen, const char *fmt, ...) {

@@ -6,17 +6,17 @@ BISON = bison
 # Interpreter version
 INTERP_SRCS = interpreter_main.c core/ast.c interpreter.c core/tiny.tab.c core/lex.yy.c
 INTERP_OBJS = $(INTERP_SRCS:.c=.o)
-INTERP_TARGET = tinyc
+INTERP_TARGET = interpreter
 
 # Compiler version (C code generator)
-COMPILER_SRCS = tcc.c core/ast.c codegen_full.c core/tiny.tab.c core/lex.yy.c
+COMPILER_SRCS = c_codegen_main.c core/ast.c c_codegen.c core/tiny.tab.c core/lex.yy.c
 COMPILER_OBJS = $(COMPILER_SRCS:.c=.o)
-COMPILER_TARGET = tinycc
+COMPILER_TARGET = c_codegen
 
 # LLVM backend compiler
-LLVM_SRCS = tlc.c core/ast.c codegen_llvm.c core/tiny.tab.c core/lex.yy.c
+LLVM_SRCS = codegen_llvm_main.c core/ast.c codegen_llvm.c core/tiny.tab.c core/lex.yy.c
 LLVM_OBJS = $(LLVM_SRCS:.c=.o)
-LLVM_TARGET = tlc
+LLVM_TARGET = codegen_llvm
 
 all: $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET)
 
