@@ -18,12 +18,12 @@
 - `interpreter_main.c` - 解释器驱动程序
 
 ### (2). C 转译编译器
-- `codegen_c.h/codegen_full.c` - C 代码生成器
-- `tcc.c` - C 转译编译器驱动
+- `c_codegen.h/c_codegen.c` - C 代码生成器
+- `c_codegen_main.c` - C 转译编译器驱动
 
 ### (3). LLVM 后端编译器
 - `codegen_llvm.h/codegen_llvm.c` - LLVM IR 代码生成器
-- `tlc.c` - LLVM 编译器驱动
+- `codegen_llvm_main.c` - LLVM 编译器驱动
 
 ----
 
@@ -33,19 +33,19 @@
 ## 构建
 
 ```bash
-make          # 构建所有三个编译器
-make tinyc    # 只构建 C 解释器
-make tinycc   # 只构建 C 转译编译器
-make tlc      # 只构建 LLVM 编译器
-make clean    # 清理构建文件
+make               # 构建所有三个编译器
+make interpreter   # 只构建 C 解释器
+make c_codegen     # 只构建 C 转译编译器
+make codegen_llvm  # 只构建 LLVM 编译器
+make clean         # 清理构建文件
 ```
 
 ## 使用方法
 
-### 1. C 解释器 (`tinyc`)
+### 1. C 解释器 (`interpreter`)
 
 ```bash
-./tinyc program.tl
+./interpreter program.tl
 ```
 
 **特点**:
@@ -53,12 +53,12 @@ make clean    # 清理构建文件
 - ✅ 比 Python 解释器快 10 倍
 - ❌ 不生成独立可执行文件
 
-### 2. C 转译编译器 (`tinycc`)
+### 2. C 转译编译器 (`c_codegen`)
 
 将 Tiny 代码转译为 C，然后用 GCC 编译：
 
 ```bash
-./tinycc program.tl -o myprogram
+./c_codegen program.tl -o myprogram
 ./myprogram
 ```
 
@@ -74,17 +74,17 @@ Tiny → C 代码 → GCC → 机器码
 - ❌ 编译时间较长（两步编译）
 - ⚠️ 字典功能有限（编译器版本）
 
-### 3. LLVM 后端编译器 (`tlc`) ⭐
+### 3. LLVM 后端编译器 (`codegen_llvm`) ⭐
 
 将 Tiny 代码编译为 LLVM IR，然后用 LLVM 编译：
 
 ```bash
 # 编译并运行
-./tlc program.tl -o myprogram
+./codegen_llvm program.tl -o myprogram
 ./myprogram
 
 # 只生成 LLVM IR（用于学习/调试）
-./tlc program.tl --emit-llvm -o program.ll
+./codegen_llvm program.tl --emit-llvm -o program.ll
 cat program.ll
 ```
 
@@ -162,7 +162,7 @@ define i32 @main() {
 
 ### 查看生成的 C 代码
 
-修改 `tcc.c`，注释掉 `unlink(c_file)`:
+修改 `c_codegen_main.c`，注释掉 `unlink(c_file)`:
 
 ```c
 // unlink(c_file);  // 注释掉这行
@@ -170,14 +170,14 @@ define i32 @main() {
 
 然后查看生成的 C 文件：
 ```bash
-./tinycc program.tl
+./c_codegen program.tl
 cat /tmp/tiny_*.c
 ```
 
 ### 查看 LLVM IR
 
 ```bash
-./tlc program.tl --emit-llvm -o program.ll
+./codegen_llvm program.tl --emit-llvm -o program.ll
 cat program.ll
 
 # 验证 IR 是否有效
@@ -189,7 +189,7 @@ llvm-dis program.bc -o -
 
 ```bash
 # 生成 IR
-./tlc program.tl --emit-llvm -o program.ll
+./codegen_llvm program.tl --emit-llvm -o program.ll
 
 # 优化 IR
 opt -O2 program.ll -S -o program_opt.ll
