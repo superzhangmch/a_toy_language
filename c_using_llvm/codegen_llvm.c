@@ -55,6 +55,7 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "@empty_str = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n\n"
 
         "; Runtime function declarations\n"
+        "declare %%Value @make_array()\n"
         "declare %%Value @append(%%Value, %%Value)\n"
         "declare %%Value @array_get(%%Value, %%Value)\n"
         "declare %%Value @array_set(%%Value, %%Value, %%Value)\n"
@@ -250,6 +251,27 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
             break;
         }
 
+        case NODE_ARRAY_LITERAL: {
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @make_array()\n", result_var);
+            break;
+        }
+
+        case NODE_INDEX_ACCESS: {
+            char obj_temp[32];
+            char idx_temp[32];
+            snprintf(obj_temp, sizeof(obj_temp), "%%t%d", gen->temp_counter++);
+            snprintf(idx_temp, sizeof(idx_temp), "%%t%d", gen->temp_counter++);
+
+            gen_expr(gen, node->data.index_access.object, obj_temp);
+            gen_expr(gen, node->data.index_access.index, idx_temp);
+
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @array_get(%%Value %s, %%Value %s)\n",
+                    result_var, obj_temp, idx_temp);
+            break;
+        }
+
         case NODE_FUNC_CALL: {
             // Evaluate arguments
             int arg_count = 0;
@@ -323,11 +345,26 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             snprintf(val_temp, sizeof(val_temp), "%%t%d", gen->temp_counter++);
             gen_expr(gen, node->data.assignment.value, val_temp);
 
-            // Store to variable (assuming simple identifier target)
+            // Store to variable or array element
             if (node->data.assignment.target->type == NODE_IDENTIFIER) {
                 emit_indent(gen);
                 fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n",
                         val_temp, node->data.assignment.target->data.identifier.name);
+            } else if (node->data.assignment.target->type == NODE_INDEX_ACCESS) {
+                // Array assignment: array_set(arr, idx, val)
+                char obj_temp[32];
+                char idx_temp[32];
+                snprintf(obj_temp, sizeof(obj_temp), "%%t%d", gen->temp_counter++);
+                snprintf(idx_temp, sizeof(idx_temp), "%%t%d", gen->temp_counter++);
+
+                gen_expr(gen, node->data.assignment.target->data.index_access.object, obj_temp);
+                gen_expr(gen, node->data.assignment.target->data.index_access.index, idx_temp);
+
+                char result_temp[32];
+                snprintf(result_temp, sizeof(result_temp), "%%t%d", gen->temp_counter++);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @array_set(%%Value %s, %%Value %s, %%Value %s)\n",
+                        result_temp, obj_temp, idx_temp, val_temp);
             }
             break;
         }

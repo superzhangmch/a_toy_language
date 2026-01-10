@@ -18,6 +18,7 @@ typedef struct {
 } Value;
 
 // Runtime functions
+Value make_array(void);
 Value append(Value arr, Value val);
 Value array_get(Value arr, Value index);
 Value array_set(Value arr, Value index, Value val);

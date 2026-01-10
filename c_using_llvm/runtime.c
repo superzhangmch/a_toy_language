@@ -16,6 +16,13 @@ static Array* new_array() {
     return a;
 }
 
+// Create empty array
+Value make_array(void) {
+    Array *a = new_array();
+    Value result = {TYPE_ARRAY, (long)a};
+    return result;
+}
+
 // Append value to array
 Value append(Value arr, Value val) {
     Array *a = (Array*)(arr.data);
