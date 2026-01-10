@@ -48,11 +48,6 @@ make clean         # 清理构建文件
 ./interpreter program.tl
 ```
 
-**特点**:
-- ✅ 支持所有语言特性（函数、递归、字典）
-- ✅ 比 Python 解释器快 10 倍
-- ❌ 不生成独立可执行文件
-
 ### 2. C 转译编译器 (`c_codegen`)
 
 将 Tiny 代码转译为 C，然后用 GCC 编译：
@@ -67,14 +62,9 @@ make clean         # 清理构建文件
 Tiny → C 代码 → GCC → 机器码
 ```
 
-**特点**:
-- ✅ 生成独立可执行文件
-- ✅ 利用 GCC 优化（-O2）
-- ✅ 比解释器快 100 倍
-- ❌ 编译时间较长（两步编译）
-- ⚠️ 字典功能有限（编译器版本）
+- Dict 功能有限（编译器版本）
 
-### 3. LLVM 后端编译器 (`codegen_llvm`) ⭐
+### 3. LLVM 后端编译器 (`codegen_llvm`) 
 
 将 Tiny 代码编译为 LLVM IR，然后用 LLVM 编译：
 
@@ -109,11 +99,6 @@ brew install flex bison llvm
 export PATH="/opt/homebrew/opt/llvm/bin:$PATH"
 ```
 
-### Ubuntu/Debian
-```bash
-sudo apt install flex bison llvm clang
-```
-
 ## LLVM IR 示例
 
 输入 Tiny 代码:
@@ -146,17 +131,6 @@ define i32 @main() {
   ret i32 0
 }
 ```
-
-## 性能对比
-
-测试程序：`factorial(10)` = 3628800
-
-| 编译器 | 运行时间 | 相对速度 | 文件大小 |
-|-------|---------|---------|---------|
-| Python 解释器 | ~10ms | 1x | - |
-| C 解释器 | ~1ms | 10x | - |
-| C 转译 (GCC -O2) | ~0.1ms | 100x | ~50KB |
-| LLVM (clang -O2) | ~0.1ms | 100x | ~50KB |
 
 ## 调试技巧
 
@@ -205,35 +179,6 @@ diff program.ll program_opt.ll
 llc program.ll -o program.s
 cat program.s
 ```
-
-## 扩展开发
-
-### 添加新的运算符
-
-1. 在 `tiny.l` 添加 token
-2. 在 `tiny.y` 添加语法规则
-3. 在 `ast.h` 添加 AST 节点类型
-4. 在 `codegen_llvm.c` 的 `gen_expr()` 添加代码生成
-
-### 添加新的语句类型
-
-1. 在 `tiny.y` 添加语法规则
-2. 在 `ast.h` 添加节点定义
-3. 在 `codegen_llvm.c` 的 `gen_statement()` 实现
-
-### 优化建议
-
-- 在 `binary_op()` 使用 LLVM 的 `select` 指令而不是 `switch`
-- 实现常量折叠（Constant Folding）
-- 添加类型推断以减少运行时检查
-- 实现内联（Inlining）小函数
-
-## 已知限制
-
-- 字符串字面量当前只支持空字符串（LLVM 版本）
-- 不支持闭包
-- 没有垃圾回收（内存泄漏）
-- 错误信息不够详细
 
 ## 测试
 
