@@ -9,6 +9,7 @@ void llvm_codegen_init(LLVMCodeGen *gen, FILE *out) {
     gen->temp_counter = 0;
     gen->label_counter = 0;
     gen->string_counter = 0;
+    gen->strings = NULL;
 }
 
 static void emit_indent(LLVMCodeGen *gen) {
@@ -26,6 +27,155 @@ static char* new_temp(LLVMCodeGen *gen) {
 // Forward declarations
 static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var);
 static void gen_statement(LLVMCodeGen *gen, ASTNode *node);
+
+// Helper to register a string literal and return its global name
+static const char* register_string_literal(LLVMCodeGen *gen, const char *str) {
+    // Check if string already registered
+    StringLiteral *s = gen->strings;
+    while (s != NULL) {
+        if (strcmp(s->value, str) == 0) {
+            return s->global_name;
+        }
+        s = s->next;
+    }
+
+    // Create new string literal entry
+    StringLiteral *new_str = malloc(sizeof(StringLiteral));
+    new_str->value = strdup(str);
+    new_str->global_name = malloc(64);
+    snprintf(new_str->global_name, 64, "@.str_%d", gen->string_counter++);
+    new_str->next = gen->strings;
+    gen->strings = new_str;
+
+    return new_str->global_name;
+}
+
+// Emit all collected string literals
+static void emit_string_literals(LLVMCodeGen *gen) {
+    StringLiteral *s = gen->strings;
+    while (s != NULL) {
+        int len = strlen(s->value) + 1;
+        fprintf(gen->out, "%s = private unnamed_addr constant [%d x i8] c\"", s->global_name, len);
+
+        // Emit escaped string content
+        for (const char *p = s->value; *p; p++) {
+            switch (*p) {
+                case '\n': fprintf(gen->out, "\\0A"); break;
+                case '\r': fprintf(gen->out, "\\0D"); break;
+                case '\t': fprintf(gen->out, "\\09"); break;
+                case '\\': fprintf(gen->out, "\\\\"); break;
+                case '"':  fprintf(gen->out, "\\22"); break;
+                default:
+                    if (*p >= 32 && *p <= 126) {
+                        fprintf(gen->out, "%c", *p);
+                    } else {
+                        fprintf(gen->out, "\\%02X", (unsigned char)*p);
+                    }
+            }
+        }
+        fprintf(gen->out, "\\00\", align 1\n");
+        s = s->next;
+    }
+}
+
+// Pre-pass to collect all string literals
+static void collect_strings_expr(LLVMCodeGen *gen, ASTNode *node);
+static void collect_strings_stmt(LLVMCodeGen *gen, ASTNode *node);
+
+static void collect_strings_expr(LLVMCodeGen *gen, ASTNode *node) {
+    if (node == NULL) return;
+
+    switch (node->type) {
+        case NODE_STRING_LITERAL:
+            register_string_literal(gen, node->data.string_literal.value);
+            break;
+        case NODE_BINARY_OP:
+            collect_strings_expr(gen, node->data.binary_op.left);
+            collect_strings_expr(gen, node->data.binary_op.right);
+            break;
+        case NODE_FUNC_CALL: {
+            ASTNodeList *arg = node->data.func_call.arguments;
+            while (arg != NULL) {
+                collect_strings_expr(gen, arg->node);
+                arg = arg->next;
+            }
+            break;
+        }
+        case NODE_INDEX_ACCESS:
+            collect_strings_expr(gen, node->data.index_access.object);
+            collect_strings_expr(gen, node->data.index_access.index);
+            break;
+        case NODE_SLICE_ACCESS:
+            collect_strings_expr(gen, node->data.slice_access.object);
+            collect_strings_expr(gen, node->data.slice_access.start);
+            collect_strings_expr(gen, node->data.slice_access.end);
+            break;
+        case NODE_ARRAY_LITERAL: {
+            ASTNodeList *elem = node->data.array_literal.elements;
+            while (elem != NULL) {
+                collect_strings_expr(gen, elem->node);
+                elem = elem->next;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+static void collect_strings_stmt(LLVMCodeGen *gen, ASTNode *node) {
+    if (node == NULL) return;
+
+    switch (node->type) {
+        case NODE_VAR_DECL:
+            collect_strings_expr(gen, node->data.var_decl.value);
+            break;
+        case NODE_ASSIGNMENT:
+            collect_strings_expr(gen, node->data.assignment.target);
+            collect_strings_expr(gen, node->data.assignment.value);
+            break;
+        case NODE_IF_STMT:
+            collect_strings_expr(gen, node->data.if_stmt.condition);
+            {
+                ASTNodeList *s = node->data.if_stmt.then_block;
+                while (s != NULL) {
+                    collect_strings_stmt(gen, s->node);
+                    s = s->next;
+                }
+                s = node->data.if_stmt.else_block;
+                while (s != NULL) {
+                    collect_strings_stmt(gen, s->node);
+                    s = s->next;
+                }
+            }
+            break;
+        case NODE_WHILE_STMT:
+            collect_strings_expr(gen, node->data.while_stmt.condition);
+            {
+                ASTNodeList *stmt = node->data.while_stmt.body;
+                while (stmt != NULL) {
+                    collect_strings_stmt(gen, stmt->node);
+                    stmt = stmt->next;
+                }
+            }
+            break;
+        case NODE_RETURN:
+            collect_strings_expr(gen, node->data.return_stmt.value);
+            break;
+        case NODE_FUNC_DEF: {
+            ASTNodeList *stmt = node->data.func_def.body;
+            while (stmt != NULL) {
+                collect_strings_stmt(gen, stmt->node);
+                stmt = stmt->next;
+            }
+            break;
+        }
+        default:
+            // For expression statements
+            collect_strings_expr(gen, node);
+            break;
+    }
+}
 
 static void emit_runtime_decls(LLVMCodeGen *gen) {
     fprintf(gen->out,
@@ -60,9 +210,15 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @array_get(%%Value, %%Value)\n"
         "declare %%Value @array_set(%%Value, %%Value, %%Value)\n"
         "declare %%Value @len(%%Value)\n"
+        "declare %%Value @str(%%Value)\n"
+        "declare %%Value @type(%%Value)\n"
         "declare %%Value @to_int(%%Value)\n"
         "declare %%Value @to_float(%%Value)\n"
-        "declare %%Value @to_string(%%Value)\n\n"
+        "declare %%Value @to_string(%%Value)\n"
+        "declare %%Value @slice_access(%%Value, %%Value, %%Value)\n"
+        "declare %%Value @input(%%Value)\n"
+        "declare %%Value @read(%%Value)\n"
+        "declare %%Value @write(%%Value, %%Value)\n\n"
     );
 }
 
@@ -210,10 +366,11 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
         }
 
         case NODE_STRING_LITERAL: {
-            // For now, use empty string literals - we'll fix this properly later
+            const char *global_name = register_string_literal(gen, node->data.string_literal.value);
+            int len = strlen(node->data.string_literal.value) + 1;
             emit_indent(gen);
-            fprintf(gen->out, "%s = call %%Value @make_string(i8* getelementptr inbounds ([1 x i8], [1 x i8]* @empty_str, i32 0, i32 0))\n",
-                    result_var);
+            fprintf(gen->out, "%s = call %%Value @make_string(i8* getelementptr inbounds ([%d x i8], [%d x i8]* %s, i32 0, i32 0))\n",
+                    result_var, len, len, global_name);
             break;
         }
 
@@ -256,8 +413,57 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
         }
 
         case NODE_ARRAY_LITERAL: {
+            // For array literals with elements, we need to:
+            // 1. Create a temporary variable to hold the array
+            // 2. Create empty array and store it
+            // 3. Append each element
+            // 4. Load final array value into result_var
+
+            char temp_var[32];
+            snprintf(temp_var, sizeof(temp_var), "%%arr_lit_%d", gen->temp_counter++);
+
+            // Allocate temporary variable
             emit_indent(gen);
-            fprintf(gen->out, "%s = call %%Value @make_array()\n", result_var);
+            fprintf(gen->out, "%s = alloca %%Value\n", temp_var);
+
+            // Create empty array
+            char arr_init[32];
+            snprintf(arr_init, sizeof(arr_init), "%%t%d", gen->temp_counter++);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @make_array()\n", arr_init);
+
+            // Store initial empty array
+            emit_indent(gen);
+            fprintf(gen->out, "store %%Value %s, %%Value* %s\n", arr_init, temp_var);
+
+            // Append each element
+            ASTNodeList *elem = node->data.array_literal.elements;
+            while (elem != NULL) {
+                char elem_temp[32];
+                char arr_load[32];
+                char append_result[32];
+                snprintf(elem_temp, sizeof(elem_temp), "%%t%d", gen->temp_counter++);
+                snprintf(arr_load, sizeof(arr_load), "%%t%d", gen->temp_counter++);
+                snprintf(append_result, sizeof(append_result), "%%t%d", gen->temp_counter++);
+
+                // Load current array value
+                emit_indent(gen);
+                fprintf(gen->out, "%s = load %%Value, %%Value* %s\n", arr_load, temp_var);
+
+                // Generate element expression
+                gen_expr(gen, elem->node, elem_temp);
+
+                // Call append
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @append(%%Value %s, %%Value %s)\n",
+                        append_result, arr_load, elem_temp);
+
+                elem = elem->next;
+            }
+
+            // Load final array value into result_var
+            emit_indent(gen);
+            fprintf(gen->out, "%s = load %%Value, %%Value* %s\n", result_var, temp_var);
             break;
         }
 
@@ -273,6 +479,24 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
             emit_indent(gen);
             fprintf(gen->out, "%s = call %%Value @array_get(%%Value %s, %%Value %s)\n",
                     result_var, obj_temp, idx_temp);
+            break;
+        }
+
+        case NODE_SLICE_ACCESS: {
+            char obj_temp[32];
+            char start_temp[32];
+            char end_temp[32];
+            snprintf(obj_temp, sizeof(obj_temp), "%%t%d", gen->temp_counter++);
+            snprintf(start_temp, sizeof(start_temp), "%%t%d", gen->temp_counter++);
+            snprintf(end_temp, sizeof(end_temp), "%%t%d", gen->temp_counter++);
+
+            gen_expr(gen, node->data.slice_access.object, obj_temp);
+            gen_expr(gen, node->data.slice_access.start, start_temp);
+            gen_expr(gen, node->data.slice_access.end, end_temp);
+
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @slice_access(%%Value %s, %%Value %s, %%Value %s)\n",
+                    result_var, obj_temp, start_temp, end_temp);
             break;
         }
 
@@ -510,6 +734,18 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
         fprintf(stderr, "Error: Expected program node\n");
         return;
     }
+
+    // Pre-pass: collect all string literals
+    ASTNodeList *s = root->data.program.statements;
+    while (s != NULL) {
+        collect_strings_stmt(gen, s->node);
+        s = s->next;
+    }
+
+    // Emit string literals
+    fprintf(gen->out, "; String literals\n");
+    emit_string_literals(gen);
+    fprintf(gen->out, "\n");
 
     // Emit declarations
     emit_runtime_decls(gen);

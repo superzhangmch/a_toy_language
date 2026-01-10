@@ -5,6 +5,8 @@
 - C 转译编译器: AST => C code => gcc 编译得到 bin
 - LLVM 后端编译器: AST => LLVM IR => llvm 编译得到 bin
 
+(补充说明: 所以三个, 是因为让 AI 直接生成可编译成 binary 的, 它居然给包了个 gcc 实现; 后来只好让它弄了个 llvm 的)
+
 ## 文件说明
 
 ### 核心组件
@@ -50,7 +52,7 @@ make clean         # 清理构建文件
 
 ### 2. C 转译编译器 (`c_codegen`)
 
-将 Tiny 代码转译为 C，然后用 GCC 编译：
+将 Tiny 代码转译为 C，然后用 GCC 编译(Dict 功能不支持):
 
 ```bash
 ./c_codegen program.tl -o myprogram
@@ -62,11 +64,10 @@ make clean         # 清理构建文件
 Tiny → C 代码 → GCC → 机器码
 ```
 
-- Dict 功能有限（编译器版本）
 
 ### 3. LLVM 后端编译器 (`codegen_llvm`) 
 
-将 Tiny 代码编译为 LLVM IR，然后用 LLVM 编译：
+将 Tiny 代码编译为 LLVM IR，然后用 LLVM 编译(Dict 功能不支持)：
 
 ```bash
 # 编译并运行

@@ -26,5 +26,11 @@ Value len(Value v);
 Value to_int(Value v);
 Value to_float(Value v);
 Value to_string(Value v);
+Value str(Value v);
+Value type(Value v);
+Value slice_access(Value obj, Value start_v, Value end_v);
+Value input(Value prompt);
+Value read(Value filename);
+Value write(Value content, Value filename);
 
 #endif
