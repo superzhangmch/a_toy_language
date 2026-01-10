@@ -23,12 +23,6 @@ static char* new_temp(LLVMCodeGen *gen) {
     return buf;
 }
 
-static char* new_label(LLVMCodeGen *gen) {
-    static char buf[32];
-    snprintf(buf, sizeof(buf), "label%d", gen->label_counter++);
-    return buf;
-}
-
 // Forward declarations
 static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var);
 static void gen_statement(LLVMCodeGen *gen, ASTNode *node);

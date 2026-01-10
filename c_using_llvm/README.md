@@ -1,6 +1,9 @@
 # C/LLVM 编译器实现
 
-包含三个编译器：C 解释器、C 转译编译器、LLVM 后端编译器。
+包含三个编译器：
+- C 解释器
+- C 转译编译器: AST => C code => gcc 编译得到 bin
+- LLVM 后端编译器: AST => LLVM IR => llvm 编译得到 bin
 
 ## 文件说明
 
@@ -9,17 +12,19 @@
 - `tiny.y` - Bison 语法分析器定义
 - `ast.h/ast.c` - AST 节点定义和操作
 
-### 解释器
+### (1). 解释器
 - `interpreter.h/interpreter.c` - C 解释器实现
-- `main.c` - 解释器驱动程序
+- `interpreter_main.c` - 解释器驱动程序
 
-### C 转译编译器
+### (2). C 转译编译器
 - `codegen_c.h/codegen_full.c` - C 代码生成器
 - `tcc.c` - C 转译编译器驱动
 
-### LLVM 后端编译器 ⭐
+### (3). LLVM 后端编译器
 - `codegen_llvm.h/codegen_llvm.c` - LLVM IR 代码生成器
 - `tlc.c` - LLVM 编译器驱动
+
+----
 
 ### 构建系统
 - `Makefile` - 构建配置
@@ -37,8 +42,6 @@ make clean    # 清理构建文件
 ## 使用方法
 
 ### 1. C 解释器 (`tinyc`)
-
-直接解释执行 AST，速度比 Python 快：
 
 ```bash
 ./tinyc program.tl

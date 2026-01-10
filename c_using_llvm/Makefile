@@ -4,7 +4,7 @@ FLEX = flex
 BISON = bison
 
 # Interpreter version
-INTERP_SRCS = main.c ast.c interpreter.c tiny.tab.c lex.yy.c
+INTERP_SRCS = interpreter_main.c ast.c interpreter.c tiny.tab.c lex.yy.c
 INTERP_OBJS = $(INTERP_SRCS:.c=.o)
 INTERP_TARGET = tinyc
 
