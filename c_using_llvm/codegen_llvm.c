@@ -118,6 +118,16 @@ static void collect_strings_expr(LLVMCodeGen *gen, ASTNode *node) {
             }
             break;
         }
+        case NODE_DICT_LITERAL: {
+            ASTNodeList *pair = node->data.dict_literal.pairs;
+            while (pair != NULL) {
+                ASTNode *pair_node = pair->node;
+                collect_strings_expr(gen, pair_node->data.dict_pair.key);
+                collect_strings_expr(gen, pair_node->data.dict_pair.value);
+                pair = pair->next;
+            }
+            break;
+        }
         default:
             break;
     }
@@ -186,7 +196,8 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "@TYPE_INT = constant i32 0\n"
         "@TYPE_FLOAT = constant i32 1\n"
         "@TYPE_STRING = constant i32 2\n"
-        "@TYPE_ARRAY = constant i32 3\n\n"
+        "@TYPE_ARRAY = constant i32 3\n"
+        "@TYPE_DICT = constant i32 4\n\n"
 
         "; Operator tags\n"
         "@OP_ADD = constant i32 0\n"
@@ -209,6 +220,7 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @append(%%Value, %%Value)\n"
         "declare %%Value @array_get(%%Value, %%Value)\n"
         "declare %%Value @array_set(%%Value, %%Value, %%Value)\n"
+        "declare %%Value @index_get(%%Value, %%Value)\n"
         "declare %%Value @len(%%Value)\n"
         "declare %%Value @str(%%Value)\n"
         "declare %%Value @type(%%Value)\n"
@@ -218,7 +230,12 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @slice_access(%%Value, %%Value, %%Value)\n"
         "declare %%Value @input(%%Value)\n"
         "declare %%Value @read(%%Value)\n"
-        "declare %%Value @write(%%Value, %%Value)\n\n"
+        "declare %%Value @write(%%Value, %%Value)\n"
+        "declare %%Value @make_dict()\n"
+        "declare %%Value @dict_set(%%Value, %%Value, %%Value)\n"
+        "declare %%Value @dict_get(%%Value, %%Value)\n"
+        "declare %%Value @dict_has(%%Value, %%Value)\n"
+        "declare %%Value @dict_keys(%%Value)\n\n"
     );
 }
 
@@ -467,6 +484,65 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
             break;
         }
 
+        case NODE_DICT_LITERAL: {
+            // For dict literals with key-value pairs:
+            // 1. Create a temporary variable to hold the dict
+            // 2. Create empty dict and store it
+            // 3. Set each key-value pair
+            // 4. Load final dict value into result_var
+
+            char temp_var[32];
+            snprintf(temp_var, sizeof(temp_var), "%%dict_lit_%d", gen->temp_counter++);
+
+            // Allocate temporary variable
+            emit_indent(gen);
+            fprintf(gen->out, "%s = alloca %%Value\n", temp_var);
+
+            // Create empty dict
+            char dict_init[32];
+            snprintf(dict_init, sizeof(dict_init), "%%t%d", gen->temp_counter++);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @make_dict()\n", dict_init);
+
+            // Store initial empty dict
+            emit_indent(gen);
+            fprintf(gen->out, "store %%Value %s, %%Value* %s\n", dict_init, temp_var);
+
+            // Set each key-value pair
+            ASTNodeList *pair = node->data.dict_literal.pairs;
+            while (pair != NULL) {
+                ASTNode *pair_node = pair->node;
+
+                char key_temp[32], val_temp[32], dict_load[32], set_result[32];
+                snprintf(key_temp, sizeof(key_temp), "%%t%d", gen->temp_counter++);
+                snprintf(val_temp, sizeof(val_temp), "%%t%d", gen->temp_counter++);
+                snprintf(dict_load, sizeof(dict_load), "%%t%d", gen->temp_counter++);
+                snprintf(set_result, sizeof(set_result), "%%t%d", gen->temp_counter++);
+
+                // Load current dict value
+                emit_indent(gen);
+                fprintf(gen->out, "%s = load %%Value, %%Value* %s\n", dict_load, temp_var);
+
+                // Generate key expression
+                gen_expr(gen, pair_node->data.dict_pair.key, key_temp);
+
+                // Generate value expression
+                gen_expr(gen, pair_node->data.dict_pair.value, val_temp);
+
+                // Call dict_set
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @dict_set(%%Value %s, %%Value %s, %%Value %s)\n",
+                        set_result, dict_load, key_temp, val_temp);
+
+                pair = pair->next;
+            }
+
+            // Load final dict value into result_var
+            emit_indent(gen);
+            fprintf(gen->out, "%s = load %%Value, %%Value* %s\n", result_var, temp_var);
+            break;
+        }
+
         case NODE_INDEX_ACCESS: {
             char obj_temp[32];
             char idx_temp[32];
@@ -477,7 +553,8 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
             gen_expr(gen, node->data.index_access.index, idx_temp);
 
             emit_indent(gen);
-            fprintf(gen->out, "%s = call %%Value @array_get(%%Value %s, %%Value %s)\n",
+            // Use generic index_get which handles array, dict, and string
+            fprintf(gen->out, "%s = call %%Value @index_get(%%Value %s, %%Value %s)\n",
                     result_var, obj_temp, idx_temp);
             break;
         }

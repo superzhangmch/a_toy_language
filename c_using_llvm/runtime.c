@@ -7,6 +7,20 @@ typedef struct {
     void *data;
 } Array;
 
+// Dict structure
+#define HASH_SIZE 256
+
+typedef struct DictEntry {
+    char *key;
+    Value value;
+    struct DictEntry *next;
+} DictEntry;
+
+typedef struct {
+    DictEntry **buckets;
+    int size;
+} Dict;
+
 // Helper to create array
 static Array* new_array() {
     Array *a = malloc(sizeof(Array));
@@ -41,6 +55,29 @@ Value array_get(Value arr, Value index) {
     long idx = index.data;
     if (idx >= 0 && idx < a->size) {
         return ((Value*)a->data)[idx];
+    }
+    Value result = {TYPE_INT, 0};
+    return result;
+}
+
+// Generic index access (handles both array and dict)
+Value index_get(Value obj, Value index) {
+    if (obj.type == TYPE_ARRAY) {
+        return array_get(obj, index);
+    } else if (obj.type == TYPE_DICT) {
+        return dict_get(obj, index);
+    } else if (obj.type == TYPE_STRING) {
+        // String indexing
+        char *s = (char*)(obj.data);
+        long idx = index.data;
+        long len = strlen(s);
+        if (idx < 0) idx += len;
+        if (idx >= 0 && idx < len) {
+            char c[2] = {s[idx], '\0'};
+            char *result_str = strdup(c);
+            Value result = {TYPE_STRING, (long)result_str};
+            return result;
+        }
     }
     Value result = {TYPE_INT, 0};
     return result;
@@ -266,4 +303,157 @@ Value write(Value content, Value filename) {
     fclose(f);
     Value result = {TYPE_INT, 1};
     return result;
+}
+
+// ===== Dict Functions =====
+
+// Hash function for dict keys
+static unsigned int hash(const char *key) {
+    unsigned int h = 0;
+    while (*key) {
+        h = h * 31 + *key++;
+    }
+    return h % HASH_SIZE;
+}
+
+// Create empty dict
+Value make_dict(void) {
+    Dict *d = malloc(sizeof(Dict));
+    d->buckets = calloc(HASH_SIZE, sizeof(DictEntry*));
+    d->size = 0;
+
+    Value result = {TYPE_DICT, (long)d};
+    return result;
+}
+
+// Set key-value pair in dict
+Value dict_set(Value dict, Value key, Value val) {
+    Dict *d = (Dict*)(dict.data);
+
+    // Convert key to string
+    char *key_str;
+    if (key.type == TYPE_STRING) {
+        key_str = (char*)(key.data);
+    } else if (key.type == TYPE_INT) {
+        // Convert int key to string
+        char buf[32];
+        snprintf(buf, sizeof(buf), "%ld", key.data);
+        key_str = strdup(buf);
+    } else {
+        // Unsupported key type, return val as-is
+        return val;
+    }
+
+    unsigned int idx = hash(key_str);
+    DictEntry *entry = d->buckets[idx];
+
+    // Check if key already exists
+    while (entry != NULL) {
+        if (strcmp(entry->key, key_str) == 0) {
+            entry->value = val;  // Update existing value
+            if (key.type == TYPE_INT) free(key_str);  // Free temp string if int key
+            return val;
+        }
+        entry = entry->next;
+    }
+
+    // Insert new entry
+    entry = malloc(sizeof(DictEntry));
+    if (key.type == TYPE_STRING) {
+        entry->key = strdup(key_str);
+    } else {
+        entry->key = key_str;  // Already allocated for int keys
+    }
+    entry->value = val;
+    entry->next = d->buckets[idx];
+    d->buckets[idx] = entry;
+    d->size++;
+
+    return val;
+}
+
+// Get value from dict by key
+Value dict_get(Value dict, Value key) {
+    Dict *d = (Dict*)(dict.data);
+
+    // Convert key to string
+    char *key_str;
+    char buf[32];
+    if (key.type == TYPE_STRING) {
+        key_str = (char*)(key.data);
+    } else if (key.type == TYPE_INT) {
+        snprintf(buf, sizeof(buf), "%ld", key.data);
+        key_str = buf;
+    } else {
+        // Unsupported key type, return 0
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+
+    unsigned int idx = hash(key_str);
+    DictEntry *entry = d->buckets[idx];
+
+    while (entry != NULL) {
+        if (strcmp(entry->key, key_str) == 0) {
+            return entry->value;
+        }
+        entry = entry->next;
+    }
+
+    // Key not found, return 0
+    Value result = {TYPE_INT, 0};
+    return result;
+}
+
+// Check if key exists in dict
+Value dict_has(Value dict, Value key) {
+    Dict *d = (Dict*)(dict.data);
+
+    // Convert key to string
+    char *key_str;
+    char buf[32];
+    if (key.type == TYPE_STRING) {
+        key_str = (char*)(key.data);
+    } else if (key.type == TYPE_INT) {
+        snprintf(buf, sizeof(buf), "%ld", key.data);
+        key_str = buf;
+    } else {
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+
+    unsigned int idx = hash(key_str);
+    DictEntry *entry = d->buckets[idx];
+
+    while (entry != NULL) {
+        if (strcmp(entry->key, key_str) == 0) {
+            Value result = {TYPE_INT, 1};  // true
+            return result;
+        }
+        entry = entry->next;
+    }
+
+    Value result = {TYPE_INT, 0};  // false
+    return result;
+}
+
+// Get all keys from dict as an array
+Value dict_keys(Value dict) {
+    Dict *d = (Dict*)(dict.data);
+
+    // Create array to store keys
+    Value arr = make_array();
+
+    for (int i = 0; i < HASH_SIZE; i++) {
+        DictEntry *entry = d->buckets[i];
+        while (entry != NULL) {
+            // Create string Value for the key
+            char *key_copy = strdup(entry->key);
+            Value key_val = {TYPE_STRING, (long)key_copy};
+            append(arr, key_val);
+            entry = entry->next;
+        }
+    }
+
+    return arr;
 }
