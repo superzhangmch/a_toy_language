@@ -15,3 +15,5 @@ core/lex.yy.c
 a.out
 runtime.o
 *.dSYM/
+*.swp
+*~

@@ -53,6 +53,15 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
 
         "; String literals\n"
         "@empty_str = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n\n"
+
+        "; Runtime function declarations\n"
+        "declare %%Value @append(%%Value, %%Value)\n"
+        "declare %%Value @array_get(%%Value, %%Value)\n"
+        "declare %%Value @array_set(%%Value, %%Value, %%Value)\n"
+        "declare %%Value @len(%%Value)\n"
+        "declare %%Value @to_int(%%Value)\n"
+        "declare %%Value @to_float(%%Value)\n"
+        "declare %%Value @to_string(%%Value)\n\n"
     );
 }
 

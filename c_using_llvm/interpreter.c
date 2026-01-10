@@ -817,7 +817,7 @@ static void eval_statement(ASTNode *node) {
             break;
         }
 
-        case NODE_FUNC_DEF: {
+        case NODE_FUNC_DEF: { // 这是函数定义, 不是函数调用. 函数调用在 eval_expression NODE_FUNC_CALL
             Value *func = create_func_value(
                 node->data.func_def.name,
                 node->data.func_def.params,

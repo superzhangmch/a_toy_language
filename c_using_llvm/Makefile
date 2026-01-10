@@ -18,6 +18,9 @@ LLVM_SRCS = codegen_llvm_main.c core/ast.c codegen_llvm.c core/tiny.tab.c core/l
 LLVM_OBJS = $(LLVM_SRCS:.c=.o)
 LLVM_TARGET = codegen_llvm
 
+# Runtime library
+RUNTIME = runtime.o
+
 all: $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET)
 
 core/tiny.tab.c core/tiny.tab.h: core/tiny.y
@@ -32,7 +35,10 @@ $(INTERP_TARGET): $(INTERP_OBJS)
 $(COMPILER_TARGET): $(COMPILER_OBJS)
 	$(CC) $(CFLAGS) -o $(COMPILER_TARGET) $(COMPILER_OBJS)
 
-$(LLVM_TARGET): $(LLVM_OBJS)
+$(RUNTIME): runtime.c runtime.h
+	$(CC) -c runtime.c -o $(RUNTIME)
+
+$(LLVM_TARGET): $(LLVM_OBJS) $(RUNTIME)
 	$(CC) $(CFLAGS) -o $(LLVM_TARGET) $(LLVM_OBJS)
 
 %.o: %.c
