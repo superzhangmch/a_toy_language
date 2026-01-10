@@ -1,6 +1,8 @@
 """
 Interpreter for the tiny language
 Executes the AST
+
+通过执行 Interpreter.interpret(): 内部是循环执行 AST 中的各个 statement(语句)
 """
 
 from typing import Any, Dict, List, Optional
@@ -21,14 +23,19 @@ class ReturnException(Exception):
 
 
 class Environment:
+    '''
+    不同作用域的变量怎么管理
+    '''
     def __init__(self, parent: Optional['Environment'] = None):
-        self.parent = parent
-        self.variables: Dict[str, Any] = {}
+        self.parent = parent                 # 更高一层(更偏全局一些的)变量
+        self.variables: Dict[str, Any] = {}  # 本地临时变量
 
     def define(self, name: str, value: Any):
+        # 新建(define)变量
         self.variables[name] = value
 
     def get(self, name: str) -> Any:
+        # 获得变量值
         if name in self.variables:
             return self.variables[name]
         if self.parent:
@@ -36,6 +43,7 @@ class Environment:
         raise Exception(f"Undefined variable: {name}")
 
     def set(self, name: str, value: Any):
+        # 修改变量值
         if name in self.variables:
             self.variables[name] = value
         elif self.parent:
@@ -49,7 +57,7 @@ class Function:
         self.name = name
         self.params = params
         self.body = body
-        self.env = env
+        self.env = env       # 维持函数内变量的作用域
 
 
 class Interpreter:
@@ -59,6 +67,9 @@ class Interpreter:
         self.setup_builtins()
 
     def setup_builtins(self):
+        '''
+        内置函数
+        '''
         # Built-in functions
         def builtin_print(*args):
             print(*args)
@@ -159,15 +170,21 @@ class Interpreter:
         self.global_env.define('write', builtin_write)
 
     def interpret(self, program: Program):
+        '''
+        遍历执行每个 statement, 从而完成程序执行. note: 一个循环是作为一个 statement 出现的.
+        每个 statement 会根据解析出的 AST, 而内部包含子 statement, 形成了层层嵌套的树结构
+        '''
         for statement in program.statements:
             self.eval_statement(statement)
 
     def eval_statement(self, node: ASTNode) -> Any:
         if isinstance(node, VarDeclaration):
+            # 变量定义
             value = self.eval_expression(node.value)
             self.current_env.define(node.name, value)
 
         elif isinstance(node, Assignment):
+            # 变量赋值
             value = self.eval_expression(node.value)
             if isinstance(node.target, Identifier):
                 self.current_env.set(node.target.name, value)
@@ -188,6 +205,7 @@ class Interpreter:
                     raise Exception(f"Cannot index type {type(obj)}")
 
         elif isinstance(node, FunctionDef):
+            # 函数定义
             func = Function(node.name, node.params, node.body, self.current_env)
             self.current_env.define(node.name, func)
 
@@ -196,6 +214,7 @@ class Interpreter:
             raise ReturnException(value)
 
         elif isinstance(node, IfStatement):
+            # if-else-then: 调用宿主语言的 if/else/then
             condition = self.eval_expression(node.condition)
             if self.is_truthy(condition):
                 for stmt in node.then_block:
@@ -205,6 +224,7 @@ class Interpreter:
                     self.eval_statement(stmt)
 
         elif isinstance(node, WhileStatement):
+            # while 循环: 调用宿主语言的 while 完成
             while True:
                 condition = self.eval_expression(node.condition)
                 if not self.is_truthy(condition):
@@ -224,6 +244,7 @@ class Interpreter:
             raise ContinueException()
 
         elif isinstance(node, FunctionCall):
+            # 函数调用
             return self.eval_expression(node)
 
         else:
@@ -314,18 +335,18 @@ class Interpreter:
             # Evaluate arguments
             args = [self.eval_expression(arg) for arg in node.arguments]
 
-            # Built-in function
+            # Built-in function: 有一些函数, 可以直接用宿主语言的函数来实现
             if callable(func) and not isinstance(func, Function):
                 return func(*args)
 
-            # User-defined function
+            # User-defined function: 用户自定义函数, 需要逐语句执行
             if isinstance(func, Function):
                 if len(args) != len(func.params):
                     raise Exception(f"Function {func.name} expects {len(func.params)} arguments, got {len(args)}")
 
                 # Create new environment for function
                 func_env = Environment(func.env)
-                for param, arg in zip(func.params, args):
+                for param, arg in zip(func.params, args): # 把函数参数变量, 放入 func_env(而func_env乃继承自上一层的变量作用域)
                     func_env.define(param, arg)
 
                 # Save and switch environment
@@ -334,12 +355,12 @@ class Interpreter:
 
                 try:
                     for stmt in func.body:
-                        self.eval_statement(stmt)
+                        self.eval_statement(stmt)         # 循环逐语句执行用户自定义函数中的语句
                     return None
                 except ReturnException as e:
                     return e.value
                 finally:
-                    self.current_env = prev_env
+                    self.current_env = prev_env           # 还原函数执行前的环境
 
             raise Exception(f"{node.name} is not a function")
 
