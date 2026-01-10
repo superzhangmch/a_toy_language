@@ -1,6 +1,8 @@
 """
 Lexer for the tiny language
 Converts source code into tokens
+
+做了啥: 对于输入的源代码, 处理成一个数组, 元素是 [TokenType, str_value|int_value|None, line_pos:start_line, line_pos:start_column]
 """
 
 from enum import Enum, auto
