@@ -67,7 +67,7 @@ Tiny → C 代码 → GCC → 机器码
 
 ### 3. LLVM 后端编译器 (`codegen_llvm`) 
 
-将 Tiny 代码编译为 LLVM IR，然后用 LLVM 编译(Dict 功能不支持)：
+将 Tiny 代码编译为 LLVM IR，然后用 LLVM 编译
 
 ```bash
 # 编译并运行
