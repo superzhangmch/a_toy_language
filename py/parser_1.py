@@ -1,11 +1,16 @@
 """
 Parser for the tiny language
 Converts tokens into an Abstract Syntax Tree (AST)
+
+做了什么: 对 lexer 解析出的 token list, 做语法 parse. 输出语法树(AST)
+- 通过调用 Parser.parse(..)
+- 所用算法: 从顶往下, 递归下降
+- fun def, if else, while 这三者的处理, 可以看出递归下降法怎么做的
 """
 
 from typing import List, Optional
-from lexer import Token, TokenType
-from ast_nodes import *
+from lexer_0 import Token, TokenType
+from ast_nodes_2 import *
 
 
 class Parser:
@@ -14,6 +19,7 @@ class Parser:
         self.pos = 0
 
     def error(self, msg: str):
+        """ parse 出错时 """
         token = self.current_token()
         raise Exception(f"Parse error at line {token.line}, column {token.column}: {msg}")
 
@@ -23,6 +29,9 @@ class Parser:
         return self.tokens[-1]  # Return EOF
 
     def peek_token(self, offset: int = 1) -> Token:
+        """
+        没用到该函数
+        """
         pos = self.pos + offset
         if pos < len(self.tokens):
             return self.tokens[pos]
@@ -41,6 +50,9 @@ class Parser:
         return self.advance()
 
     def parse(self) -> Program:
+        """
+        解析成一个一个 statements(语句): 本 class 暴露出的其实就是这个函数
+        """
         statements = []
         while self.current_token().type != TokenType.EOF:
             stmt = self.parse_statement()
@@ -114,27 +126,31 @@ class Parser:
         return VarDeclaration(name_token.value, value)
 
     def parse_function_def(self) -> FunctionDef:
-        self.expect(TokenType.FUNC)
-        name_token = self.expect(TokenType.IDENTIFIER)
-        self.expect(TokenType.LPAREN)
+        """
+        函数调用
+        func $func_name($arg1, $arg2, ..) { ... }
+        """
+        self.expect(TokenType.FUNC)                          # func 关键词
+        name_token = self.expect(TokenType.IDENTIFIER)       # 函数名
+        self.expect(TokenType.LPAREN)                        # (
 
         params = []
         while self.current_token().type != TokenType.RPAREN:
-            param_token = self.expect(TokenType.IDENTIFIER)
+            param_token = self.expect(TokenType.IDENTIFIER)  # 参数
             params.append(param_token.value)
             if self.current_token().type == TokenType.COMMA:
                 self.advance()
 
-        self.expect(TokenType.RPAREN)
-        self.expect(TokenType.LBRACE)
+        self.expect(TokenType.RPAREN)                        # )
+        self.expect(TokenType.LBRACE)                        # {
 
         body = []
         while self.current_token().type != TokenType.RBRACE:
-            stmt = self.parse_statement()
+            stmt = self.parse_statement()                    # 函数体的各个语句
             if stmt:
                 body.append(stmt)
 
-        self.expect(TokenType.RBRACE)
+        self.expect(TokenType.RBRACE)                        # }
         return FunctionDef(name_token.value, params, body)
 
     def parse_return(self) -> Return:
@@ -145,43 +161,50 @@ class Parser:
         return Return(value)
 
     def parse_if_statement(self) -> IfStatement:
-        self.expect(TokenType.IF)
-        self.expect(TokenType.LPAREN)
-        condition = self.parse_expression()
-        self.expect(TokenType.RPAREN)
-        self.expect(TokenType.LBRACE)
+        '''
+        if (..) {..} else if {...}
+        if (..) {..} else {...}
+        '''
+        self.expect(TokenType.IF)                             # if
+        self.expect(TokenType.LPAREN)                         # (
+        condition = self.parse_expression()                   #   ... 
+        self.expect(TokenType.RPAREN)                         # )
+        self.expect(TokenType.LBRACE)                         # {
 
         then_block = []
         while self.current_token().type != TokenType.RBRACE:
-            stmt = self.parse_statement()
+            stmt = self.parse_statement()                     #   ... if 分支的各个语句
             if stmt:
                 then_block.append(stmt)
 
-        self.expect(TokenType.RBRACE)
+        self.expect(TokenType.RBRACE)                         # }
 
         else_block = None
-        if self.current_token().type == TokenType.ELSE:
+        if self.current_token().type == TokenType.ELSE:       # else 
             self.advance()
-            if self.current_token().type == TokenType.IF:
+            if self.current_token().type == TokenType.IF:     #    if   也就是如果组成了 else if
                 # else if
-                else_block = [self.parse_if_statement()]
+                else_block = [self.parse_if_statement()]      #    else if, 则是重启了 if (..) {..}, 递归调用 parse_if_statement
             else:
-                self.expect(TokenType.LBRACE)
+                self.expect(TokenType.LBRACE)                 # {
                 else_block = []
                 while self.current_token().type != TokenType.RBRACE:
                     stmt = self.parse_statement()
                     if stmt:
                         else_block.append(stmt)
-                self.expect(TokenType.RBRACE)
+                self.expect(TokenType.RBRACE)                 # }
 
         return IfStatement(condition, then_block, else_block)
 
     def parse_while_statement(self) -> WhileStatement:
-        self.expect(TokenType.WHILE)
-        self.expect(TokenType.LPAREN)
+        """
+        while (...) {...}
+        """
+        self.expect(TokenType.WHILE)               # while 
+        self.expect(TokenType.LPAREN)              # (
         condition = self.parse_expression()
-        self.expect(TokenType.RPAREN)
-        self.expect(TokenType.LBRACE)
+        self.expect(TokenType.RPAREN)              # )
+        self.expect(TokenType.LBRACE)              # {
 
         body = []
         while self.current_token().type != TokenType.RBRACE:
@@ -189,7 +212,7 @@ class Parser:
             if stmt:
                 body.append(stmt)
 
-        self.expect(TokenType.RBRACE)
+        self.expect(TokenType.RBRACE)              # }
         return WhileStatement(condition, body)
 
     def parse_expression(self) -> ASTNode:

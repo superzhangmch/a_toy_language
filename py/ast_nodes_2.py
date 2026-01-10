@@ -43,6 +43,7 @@ class ArrayLiteral(ASTNode):
 
 @dataclass
 class DictLiteral(ASTNode):
+    # {k: v, ..}
     pairs: List[tuple[ASTNode, ASTNode]]  # List of (key, value) pairs
 
 
@@ -91,6 +92,11 @@ class Assignment(ASTNode):
 
 @dataclass
 class FunctionDef(ASTNode):
+    '''
+    func name(params) {
+        body
+    }
+    '''
     name: str
     params: List[str]
     body: List[ASTNode]
@@ -98,6 +104,9 @@ class FunctionDef(ASTNode):
 
 @dataclass
 class FunctionCall(ASTNode):
+    '''
+    函数调用: name(arguments)
+    '''
     name: str
     arguments: List[ASTNode]
 
@@ -109,13 +118,25 @@ class Return(ASTNode):
 
 @dataclass
 class IfStatement(ASTNode):
-    condition: ASTNode
-    then_block: List[ASTNode]
-    else_block: Optional[List[ASTNode]]
+    '''
+    if (condition) {
+        then_block
+    } else {
+        else_block
+    }
+    '''
+    condition: ASTNode                    # if 的判断条件
+    then_block: List[ASTNode]             # if 分支代码
+    else_block: Optional[List[ASTNode]]   # else 分支代码
 
 
 @dataclass
 class WhileStatement(ASTNode):
+    '''
+    while (condition) {
+        body
+    }
+    '''
     condition: ASTNode
     body: List[ASTNode]
 

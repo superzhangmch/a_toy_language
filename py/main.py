@@ -4,9 +4,9 @@ Main entry point for the tiny language compiler/interpreter
 """
 
 import sys
-from lexer import Lexer
-from parser import Parser
-from interpreter import Interpreter
+from lexer_0 import Lexer
+from parser_1 import Parser
+from interpreter_4 import Interpreter
 
 
 def run_file(filename: str):
