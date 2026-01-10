@@ -8,9 +8,10 @@
 ## 文件说明
 
 ### 核心组件
-- `tiny.l` - Flex 词法分析器定义
-- `tiny.y` - Bison 语法分析器定义
-- `ast.h/ast.c` - AST 节点定义和操作
+- `core/tiny.l` - Flex 词法分析器定义
+- `core/tiny.y` - Bison 语法分析器定义
+- `core/ast.h` - AST 节点定义和操作
+- `core/ast.c` - AST 节点定义和操作
 
 ### (1). 解释器
 - `interpreter.h/interpreter.c` - C 解释器实现

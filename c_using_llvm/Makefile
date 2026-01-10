@@ -1,30 +1,30 @@
 CC = gcc
-CFLAGS = -Wall -g
+CFLAGS = -Wall -g -Icore
 FLEX = flex
 BISON = bison
 
 # Interpreter version
-INTERP_SRCS = interpreter_main.c ast.c interpreter.c tiny.tab.c lex.yy.c
+INTERP_SRCS = interpreter_main.c core/ast.c interpreter.c core/tiny.tab.c core/lex.yy.c
 INTERP_OBJS = $(INTERP_SRCS:.c=.o)
 INTERP_TARGET = tinyc
 
 # Compiler version (C code generator)
-COMPILER_SRCS = tcc.c ast.c codegen_full.c tiny.tab.c lex.yy.c
+COMPILER_SRCS = tcc.c core/ast.c codegen_full.c core/tiny.tab.c core/lex.yy.c
 COMPILER_OBJS = $(COMPILER_SRCS:.c=.o)
 COMPILER_TARGET = tinycc
 
 # LLVM backend compiler
-LLVM_SRCS = tlc.c ast.c codegen_llvm.c tiny.tab.c lex.yy.c
+LLVM_SRCS = tlc.c core/ast.c codegen_llvm.c core/tiny.tab.c core/lex.yy.c
 LLVM_OBJS = $(LLVM_SRCS:.c=.o)
 LLVM_TARGET = tlc
 
 all: $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET)
 
-tiny.tab.c tiny.tab.h: tiny.y
-	$(BISON) -d tiny.y
+core/tiny.tab.c core/tiny.tab.h: core/tiny.y
+	$(BISON) -d core/tiny.y -o core/tiny.tab.c
 
-lex.yy.c: tiny.l tiny.tab.h
-	$(FLEX) tiny.l
+core/lex.yy.c: core/tiny.l core/tiny.tab.h
+	$(FLEX) -o core/lex.yy.c core/tiny.l
 
 $(INTERP_TARGET): $(INTERP_OBJS)
 	$(CC) $(CFLAGS) -o $(INTERP_TARGET) $(INTERP_OBJS)
@@ -39,7 +39,7 @@ $(LLVM_TARGET): $(LLVM_OBJS)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(INTERP_OBJS) $(COMPILER_OBJS) $(LLVM_OBJS) $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET) tiny.tab.c tiny.tab.h lex.yy.c runtime.o a.out
+	rm -f $(INTERP_OBJS) $(COMPILER_OBJS) $(LLVM_OBJS) $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET) core/tiny.tab.c core/tiny.tab.h core/lex.yy.c runtime.o a.out
 
 test: $(INTERP_TARGET)
 	@echo "Testing interpreter with hello.tl:"
