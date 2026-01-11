@@ -74,6 +74,8 @@ class Parser:
             return self.parse_if_statement()  # If statements don't have semicolons
         elif token.type == TokenType.WHILE:
             return self.parse_while_statement()  # While loops don't have semicolons
+        elif token.type == TokenType.FOREACH:
+            return self.parse_foreach_statement()  # Foreach loops don't have semicolons
         elif token.type == TokenType.BREAK:
             self.advance()
             stmt = Break()
@@ -214,6 +216,49 @@ class Parser:
 
         self.expect(TokenType.RBRACE)              # }
         return WhileStatement(condition, body)
+
+    def parse_foreach_statement(self) -> 'ForeachStatement':
+        """
+        foreach(key_var => value_var in collection) {...}
+        """
+        from ast_nodes_2 import ForeachStatement
+
+        self.expect(TokenType.FOREACH)            # foreach
+        self.expect(TokenType.LPAREN)             # (
+
+        # Parse key_var
+        key_token = self.current_token()
+        if key_token.type != TokenType.IDENTIFIER:
+            self.error(f"Expected identifier for key variable, got {key_token.type}")
+        key_var = key_token.value
+        self.advance()
+
+        self.expect(TokenType.ARROW)              # =>
+
+        # Parse value_var
+        value_token = self.current_token()
+        if value_token.type != TokenType.IDENTIFIER:
+            self.error(f"Expected identifier for value variable, got {value_token.type}")
+        value_var = value_token.value
+        self.advance()
+
+        self.expect(TokenType.IN)                 # in
+
+        # Parse collection expression
+        collection = self.parse_expression()
+
+        self.expect(TokenType.RPAREN)             # )
+        self.expect(TokenType.LBRACE)             # {
+
+        # Parse body
+        body = []
+        while self.current_token().type != TokenType.RBRACE:
+            stmt = self.parse_statement()
+            if stmt:
+                body.append(stmt)
+
+        self.expect(TokenType.RBRACE)             # }
+        return ForeachStatement(key_var, value_var, collection, body)
 
     def parse_expression(self) -> ASTNode:
         return self.parse_logical_or()

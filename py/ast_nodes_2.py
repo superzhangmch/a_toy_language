@@ -142,6 +142,19 @@ class WhileStatement(ASTNode):
 
 
 @dataclass
+class ForeachStatement(ASTNode):
+    '''
+    foreach(key_var => value_var in collection) {
+        body
+    }
+    '''
+    key_var: str
+    value_var: str
+    collection: ASTNode
+    body: List[ASTNode]
+
+
+@dataclass
 class Break(ASTNode):
     pass
 

@@ -52,6 +52,17 @@ while (condition) {
     break
     continue
 }
+
+# 遍历
+
+foreach (key => val in $dict) {
+   ...
+}
+
+foreach (idx => list[idx] in $list) {
+   ...
+}
+
 ```
 
 ### 函数

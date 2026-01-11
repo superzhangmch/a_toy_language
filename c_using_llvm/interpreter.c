@@ -874,6 +874,51 @@ static void eval_statement(ASTNode *node) {
             break;
         }
 
+        case NODE_FOREACH_STMT: {
+            Value *collection = eval_expression(node->data.foreach_stmt.collection);
+
+            if (setjmp(break_jmp) == 0) {
+                if (collection->type == VAL_ARRAY) {
+                    Array *arr = collection->data.array_val;
+                    for (int i = 0; i < arr->size && !has_returned; i++) {
+                        env_define(current_env, node->data.foreach_stmt.key_var, create_int_value(i));
+                        env_define(current_env, node->data.foreach_stmt.value_var, arr->elements[i]);
+
+                        if (setjmp(continue_jmp) == 0) {
+                            ASTNodeList *stmt = node->data.foreach_stmt.body;
+                            while (stmt != NULL && !has_returned) {
+                                eval_statement(stmt->node);
+                                stmt = stmt->next;
+                            }
+                        }
+                    }
+                } else if (collection->type == VAL_DICT) {
+                    Dict *dict = collection->data.dict_val;
+                    int count;
+                    char **keys = dict_keys(dict, &count);
+
+                    for (int i = 0; i < count && !has_returned; i++) {
+                        env_define(current_env, node->data.foreach_stmt.key_var, create_string_value(keys[i]));
+                        env_define(current_env, node->data.foreach_stmt.value_var, dict_get(dict, keys[i]));
+
+                        if (setjmp(continue_jmp) == 0) {
+                            ASTNodeList *stmt = node->data.foreach_stmt.body;
+                            while (stmt != NULL && !has_returned) {
+                                eval_statement(stmt->node);
+                                stmt = stmt->next;
+                            }
+                        }
+                    }
+
+                    free(keys);
+                } else {
+                    fprintf(stderr, "Can only iterate over arrays and dicts\n");
+                    exit(1);
+                }
+            }
+            break;
+        }
+
         case NODE_BREAK:
             longjmp(break_jmp, 1);
             break;

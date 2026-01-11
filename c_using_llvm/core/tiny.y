@@ -30,18 +30,18 @@ ASTNode *root = NULL;
 %token <sval> STRING IDENTIFIER
 %token <bval> TRUE FALSE
 
-%token VAR FUNC RETURN IF ELSE WHILE BREAK CONTINUE
+%token VAR FUNC RETURN IF ELSE WHILE FOREACH IN BREAK CONTINUE
 %token AND OR NOT
 %token PLUS MINUS MULTIPLY DIVIDE MODULO
 %token EQ NE LT LE GT GE
-%token ASSIGN PLUS_ASSIGN MINUS_ASSIGN MULTIPLY_ASSIGN DIVIDE_ASSIGN
+%token ASSIGN PLUS_ASSIGN MINUS_ASSIGN MULTIPLY_ASSIGN DIVIDE_ASSIGN ARROW
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
 %token COMMA COLON SEMICOLON
 
 %type <node> program statement expression primary_expr postfix_expr
 %type <node> unary_expr multiplicative_expr additive_expr comparison_expr
 %type <node> equality_expr logical_and_expr logical_or_expr
-%type <node> var_decl func_def return_stmt if_stmt while_stmt
+%type <node> var_decl func_def return_stmt if_stmt while_stmt foreach_stmt
 %type <node> assignment array_literal dict_literal
 %type <list> statement_list expr_list param_list dict_pair_list
 
@@ -77,6 +77,7 @@ statement:
     | return_stmt opt_semicolon
     | if_stmt
     | while_stmt
+    | foreach_stmt
     | BREAK opt_semicolon {
         $$ = create_break();
     }
@@ -141,6 +142,12 @@ if_stmt:
 while_stmt:
     WHILE LPAREN expression RPAREN LBRACE statement_list RBRACE {
         $$ = create_while_stmt($3, $6);
+    }
+    ;
+
+foreach_stmt:
+    FOREACH LPAREN IDENTIFIER ARROW IDENTIFIER IN expression RPAREN LBRACE statement_list RBRACE {
+        $$ = create_foreach_stmt($3, $5, $7, $10);
     }
     ;
 

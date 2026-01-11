@@ -27,10 +27,13 @@ class TokenType(Enum):
     THEN = auto()
     ELSE = auto()
     WHILE = auto()
+    FOREACH = auto()
+    IN = auto()
     BREAK = auto()
     CONTINUE = auto()
 
     # Operators
+    ARROW = auto()  # =>
     PLUS = auto()
     MINUS = auto()
     MULTIPLY = auto()
@@ -95,6 +98,8 @@ class Lexer:
             'then': TokenType.THEN,
             'else': TokenType.ELSE,
             'while': TokenType.WHILE,
+            'foreach': TokenType.FOREACH,
+            'in': TokenType.IN,
             'break': TokenType.BREAK,
             'continue': TokenType.CONTINUE,
             'true': TokenType.TRUE,
@@ -264,6 +269,9 @@ class Lexer:
                 if self.peek() == '=':
                     self.advance()
                     self.tokens.append(Token(TokenType.EQ, None, start_line, start_column))
+                elif self.peek() == '>':
+                    self.advance()
+                    self.tokens.append(Token(TokenType.ARROW, None, start_line, start_column))
                 else:
                     self.tokens.append(Token(TokenType.ASSIGN, None, start_line, start_column))
 

@@ -144,6 +144,15 @@ ASTNode *create_while_stmt(ASTNode *condition, ASTNodeList *body) {
     return node;
 }
 
+ASTNode *create_foreach_stmt(char *key_var, char *value_var, ASTNode *collection, ASTNodeList *body) {
+    ASTNode *node = create_node(NODE_FOREACH_STMT);
+    node->data.foreach_stmt.key_var = strdup(key_var);
+    node->data.foreach_stmt.value_var = strdup(value_var);
+    node->data.foreach_stmt.collection = collection;
+    node->data.foreach_stmt.body = body;
+    return node;
+}
+
 ASTNode *create_break() {
     return create_node(NODE_BREAK);
 }

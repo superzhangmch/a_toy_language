@@ -26,6 +26,8 @@ extern int yylineno;
 "if"                    { return IF; }
 "else"                  { return ELSE; }
 "while"                 { return WHILE; }
+"foreach"               { return FOREACH; }
+"in"                    { return IN; }
 "break"                 { return BREAK; }
 "continue"              { return CONTINUE; }
 "true"                  { yylval.bval = 1; return TRUE; }
@@ -68,6 +70,7 @@ extern int yylineno;
                             return STRING;
                         }
 
+"=>"                    { return ARROW; }
 "+="                    { return PLUS_ASSIGN; }
 "-="                    { return MINUS_ASSIGN; }
 "*="                    { return MULTIPLY_ASSIGN; }

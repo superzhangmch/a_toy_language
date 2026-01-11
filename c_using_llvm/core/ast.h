@@ -17,6 +17,7 @@ typedef enum {
     NODE_RETURN,
     NODE_IF_STMT,
     NODE_WHILE_STMT,
+    NODE_FOREACH_STMT,
     NODE_BREAK,
     NODE_CONTINUE,
     NODE_ARRAY_LITERAL,
@@ -115,6 +116,13 @@ struct ASTNode {
         } while_stmt;
 
         struct {
+            char *key_var;
+            char *value_var;
+            ASTNode *collection;
+            ASTNodeList *body;
+        } foreach_stmt;
+
+        struct {
             ASTNodeList *elements;
         } array_literal;
 
@@ -157,6 +165,7 @@ ASTNode *create_func_call(char *name, ASTNodeList *arguments);
 ASTNode *create_return(ASTNode *value);
 ASTNode *create_if_stmt(ASTNode *condition, ASTNodeList *then_block, ASTNodeList *else_block);
 ASTNode *create_while_stmt(ASTNode *condition, ASTNodeList *body);
+ASTNode *create_foreach_stmt(char *key_var, char *value_var, ASTNode *collection, ASTNodeList *body);
 ASTNode *create_break();
 ASTNode *create_continue();
 ASTNode *create_array_literal(ASTNodeList *elements);

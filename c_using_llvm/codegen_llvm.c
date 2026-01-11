@@ -169,6 +169,16 @@ static void collect_strings_stmt(LLVMCodeGen *gen, ASTNode *node) {
                 }
             }
             break;
+        case NODE_FOREACH_STMT:
+            collect_strings_expr(gen, node->data.foreach_stmt.collection);
+            {
+                ASTNodeList *stmt = node->data.foreach_stmt.body;
+                while (stmt != NULL) {
+                    collect_strings_stmt(gen, stmt->node);
+                    stmt = stmt->next;
+                }
+            }
+            break;
         case NODE_RETURN:
             collect_strings_expr(gen, node->data.return_stmt.value);
             break;
@@ -596,8 +606,10 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
 
             // Check for built-in functions
             if (strcmp(node->data.func_call.name, "print") == 0) {
-                emit_indent(gen);
-                fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[0]);
+                for (int i = 0; i < arg_count; i++) {
+                    emit_indent(gen);
+                    fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[i]);
+                }
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", result_var);
             } else {
@@ -777,6 +789,165 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             }
             emit_indent(gen);
             fprintf(gen->out, "br label %%%s\n", cond_label);
+            gen->indent_level--;
+
+            fprintf(gen->out, "\n%s:\n", end_label);
+            break;
+        }
+
+        case NODE_FOREACH_STMT: {
+            // Generate foreach loop for arrays and dicts
+            char collection_temp[32], type_temp[32], type_field_temp[32];
+            snprintf(collection_temp, sizeof(collection_temp), "%%t%d", gen->temp_counter++);
+            snprintf(type_temp, sizeof(type_temp), "%%t%d", gen->temp_counter++);
+            snprintf(type_field_temp, sizeof(type_field_temp), "%%t%d", gen->temp_counter++);
+
+            gen_expr(gen, node->data.foreach_stmt.collection, collection_temp);
+
+            // Get type field
+            emit_indent(gen);
+            fprintf(gen->out, "%s = extractvalue %%Value %s, 0\n", type_field_temp, collection_temp);
+
+            // Check if array (type == 3)
+            emit_indent(gen);
+            fprintf(gen->out, "%s = icmp eq i32 %s, 3\n", type_temp, type_field_temp);
+
+            char array_label[32], dict_label[32], end_label[32];
+            snprintf(array_label, sizeof(array_label), "label%d", gen->label_counter++);
+            snprintf(dict_label, sizeof(dict_label), "label%d", gen->label_counter++);
+            snprintf(end_label, sizeof(end_label), "label%d", gen->label_counter++);
+
+            emit_indent(gen);
+            fprintf(gen->out, "br i1 %s, label %%%s, label %%%s\n", type_temp, array_label, dict_label);
+
+            // Array foreach
+            fprintf(gen->out, "\n%s:\n", array_label);
+            gen->indent_level++;
+            {
+                char len_temp[32], i_ptr[32];
+                snprintf(len_temp, sizeof(len_temp), "%%t%d", gen->temp_counter++);
+                snprintf(i_ptr, sizeof(i_ptr), "%%t%d", gen->temp_counter++);
+
+                // Get array length
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @len(%%Value %s)\n", len_temp, collection_temp);
+
+                // Allocate loop variables
+                const char *key_var = node->data.foreach_stmt.key_var;
+                const char *value_var = node->data.foreach_stmt.value_var;
+
+                emit_indent(gen);
+                fprintf(gen->out, "%%%s = alloca %%Value\n", key_var);
+                emit_indent(gen);
+                fprintf(gen->out, "%%%s = alloca %%Value\n", value_var);
+
+                // Allocate loop counter
+                emit_indent(gen);
+                fprintf(gen->out, "%s = alloca i64\n", i_ptr);
+                emit_indent(gen);
+                fprintf(gen->out, "store i64 0, i64* %s\n", i_ptr);
+
+                char loop_cond[32], loop_body[32], loop_incr[32], loop_end[32];
+                snprintf(loop_cond, sizeof(loop_cond), "label%d", gen->label_counter++);
+                snprintf(loop_body, sizeof(loop_body), "label%d", gen->label_counter++);
+                snprintf(loop_incr, sizeof(loop_incr), "label%d", gen->label_counter++);
+                snprintf(loop_end, sizeof(loop_end), "label%d", gen->label_counter++);
+
+                emit_indent(gen);
+                fprintf(gen->out, "br label %%%s\n", loop_cond);
+
+                // Loop condition
+                fprintf(gen->out, "\n%s:\n", loop_cond);
+                gen->indent_level++;
+
+                char i_val[32], len_val[32], cmp_result[32];
+                snprintf(i_val, sizeof(i_val), "%%t%d", gen->temp_counter++);
+                snprintf(len_val, sizeof(len_val), "%%t%d", gen->temp_counter++);
+                snprintf(cmp_result, sizeof(cmp_result), "%%t%d", gen->temp_counter++);
+
+                emit_indent(gen);
+                fprintf(gen->out, "%s = load i64, i64* %s\n", i_val, i_ptr);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", len_val, len_temp);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = icmp slt i64 %s, %s\n", cmp_result, i_val, len_val);
+                emit_indent(gen);
+                fprintf(gen->out, "br i1 %s, label %%%s, label %%%s\n", cmp_result, loop_body, loop_end);
+                gen->indent_level--;
+
+                // Loop body
+                fprintf(gen->out, "\n%s:\n", loop_body);
+                gen->indent_level++;
+
+                // Set key_var = i
+                char key_val_temp[32], value_val_temp[32], idx_val_temp[32];
+                snprintf(key_val_temp, sizeof(key_val_temp), "%%t%d", gen->temp_counter++);
+                snprintf(idx_val_temp, sizeof(idx_val_temp), "%%t%d", gen->temp_counter++);
+                snprintf(value_val_temp, sizeof(value_val_temp), "%%t%d", gen->temp_counter++);
+
+                emit_indent(gen);
+                fprintf(gen->out, "%s = load i64, i64* %s\n", idx_val_temp, i_ptr);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = insertvalue %%Value { i32 0, i64 0 }, i64 %s, 1\n", key_val_temp, idx_val_temp);
+
+                // Store key_var
+                emit_indent(gen);
+                fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n", key_val_temp, key_var);
+
+                // Get value using array_get
+                char array_get_idx[32];
+                snprintf(array_get_idx, sizeof(array_get_idx), "%%t%d", gen->temp_counter++);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = insertvalue %%Value { i32 0, i64 0 }, i64 %s, 1\n", array_get_idx, idx_val_temp);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @index_get(%%Value %s, %%Value %s)\n",
+                        value_val_temp, collection_temp, array_get_idx);
+
+                // Store value_var
+                emit_indent(gen);
+                fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n", value_val_temp, value_var);
+
+                // Execute body statements
+                ASTNodeList *stmt = node->data.foreach_stmt.body;
+                while (stmt != NULL) {
+                    gen_statement(gen, stmt->node);
+                    stmt = stmt->next;
+                }
+
+                emit_indent(gen);
+                fprintf(gen->out, "br label %%%s\n", loop_incr);
+                gen->indent_level--;
+
+                // Loop increment
+                fprintf(gen->out, "\n%s:\n", loop_incr);
+                gen->indent_level++;
+                char i_next[32], i_curr[32];
+                snprintf(i_curr, sizeof(i_curr), "%%t%d", gen->temp_counter++);
+                snprintf(i_next, sizeof(i_next), "%%t%d", gen->temp_counter++);
+
+                emit_indent(gen);
+                fprintf(gen->out, "%s = load i64, i64* %s\n", i_curr, i_ptr);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = add i64 %s, 1\n", i_next, i_curr);
+                emit_indent(gen);
+                fprintf(gen->out, "store i64 %s, i64* %s\n", i_next, i_ptr);
+                emit_indent(gen);
+                fprintf(gen->out, "br label %%%s\n", loop_cond);
+                gen->indent_level--;
+
+                fprintf(gen->out, "\n%s:\n", loop_end);
+                emit_indent(gen);
+                fprintf(gen->out, "br label %%%s\n", end_label);
+            }
+            gen->indent_level--;
+
+            // Dict foreach (simplified - just jump to end for now)
+            fprintf(gen->out, "\n%s:\n", dict_label);
+            gen->indent_level++;
+            emit_indent(gen);
+            fprintf(gen->out, "; TODO: dict foreach not yet implemented in codegen\n");
+            emit_indent(gen);
+            fprintf(gen->out, "br label %%%s\n", end_label);
             gen->indent_level--;
 
             fprintf(gen->out, "\n%s:\n", end_label);

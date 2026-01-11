@@ -237,6 +237,39 @@ class Interpreter:
                 except ContinueException:
                     continue
 
+        elif isinstance(node, ForeachStatement):
+            # foreach 循环: 遍历数组或字典
+            collection = self.eval_expression(node.collection)
+
+            if isinstance(collection, list):
+                # Array iteration
+                try:
+                    for idx, value in enumerate(collection):
+                        self.current_env.define(node.key_var, idx)
+                        self.current_env.define(node.value_var, value)
+                        try:
+                            for stmt in node.body:
+                                self.eval_statement(stmt)
+                        except ContinueException:
+                            continue
+                except BreakException:
+                    pass
+            elif isinstance(collection, dict):
+                # Dict iteration
+                try:
+                    for key, value in collection.items():
+                        self.current_env.define(node.key_var, key)
+                        self.current_env.define(node.value_var, value)
+                        try:
+                            for stmt in node.body:
+                                self.eval_statement(stmt)
+                        except ContinueException:
+                            continue
+                except BreakException:
+                    pass
+            else:
+                raise RuntimeError(f"Cannot iterate over {type(collection)}")
+
         elif isinstance(node, Break):
             raise BreakException()
 
