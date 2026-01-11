@@ -85,7 +85,8 @@ print(result)  # 输出: 3628800
 ```
 
 ### 内置函数
-- `print(x)` - 打印值
+- `print(x, y, ..)` - 打印
+- `println(x, ..)` - 打印同时换行
 - `len(x)` - 获取长度
 - `str(x)` - 转换为字符串
 - `int(x)` - 转换为整数
@@ -95,6 +96,11 @@ print(result)  # 输出: 3628800
 - `input()` - 读取用户输入
 - `read(filename)` - 读取文件
 - `write(content, filename)` - 写入文件
+- `regexp_match(regexp, str)`
+- `regexp_find(regexp, str)` - 返回正则中的括号指定的匹配的字符串, 返回字符串数组, 找不到匹配返回 []. 多个匹配只返回第一个
+- `regexp_replace(regexp, str, replace_with)`
+- `str_split(str, seperator)`
+- `str_join(str_list, seperator)`
 
 ### 其他
 

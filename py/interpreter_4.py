@@ -72,6 +72,12 @@ class Interpreter:
         '''
         # Built-in functions
         def builtin_print(*args):
+            # Print without automatic newline
+            print(*args, end='')
+            return None
+
+        def builtin_println(*args):
+            # Print with automatic newline
             print(*args)
             return None
 
@@ -153,7 +159,56 @@ class Interpreter:
             except Exception as e:
                 raise Exception(f"Error writing to file '{filename}': {e}")
 
+        def builtin_regexp_match(pattern, text):
+            """Check if pattern matches text"""
+            import re
+            try:
+                return 1 if re.search(pattern, text) else 0
+            except Exception as e:
+                raise Exception(f"Invalid regex pattern '{pattern}': {e}")
+
+        def builtin_regexp_find(pattern, text):
+            """Find all matches of pattern in text, returns capture groups if present"""
+            import re
+            try:
+                matches = re.findall(pattern, text)
+                # If matches contain tuples (capture groups), flatten them
+                if matches and isinstance(matches[0], tuple):
+                    # Flatten all tuples into a single list
+                    result = []
+                    for match in matches:
+                        result.extend(match)
+                    return result
+                return matches
+            except Exception as e:
+                raise Exception(f"Invalid regex pattern '{pattern}': {e}")
+
+        def builtin_regexp_replace(pattern, text, replacement):
+            """Replace all matches of pattern in text with replacement"""
+            import re
+            try:
+                return re.sub(pattern, replacement, text)
+            except Exception as e:
+                raise Exception(f"Invalid regex pattern '{pattern}': {e}")
+
+        def builtin_str_split(text, separator):
+            """Split text by separator"""
+            if not isinstance(text, str) or not isinstance(separator, str):
+                raise Exception("str_split() requires two string arguments")
+            if not separator:
+                raise Exception("str_split() separator cannot be empty")
+            return text.split(separator)
+
+        def builtin_str_join(arr, separator):
+            """Join array elements with separator"""
+            if not isinstance(arr, list):
+                raise Exception("str_join() requires an array")
+            if not isinstance(separator, str):
+                raise Exception("str_join() separator must be a string")
+            return separator.join(str(x) for x in arr)
+
         self.global_env.define('print', builtin_print)
+        self.global_env.define('println', builtin_println)
         self.global_env.define('len', builtin_len)
         self.global_env.define('int', builtin_int)
         self.global_env.define('float', builtin_float)
@@ -168,6 +223,11 @@ class Interpreter:
         self.global_env.define('values', builtin_values)
         self.global_env.define('read', builtin_read)
         self.global_env.define('write', builtin_write)
+        self.global_env.define('regexp_match', builtin_regexp_match)
+        self.global_env.define('regexp_find', builtin_regexp_find)
+        self.global_env.define('regexp_replace', builtin_regexp_replace)
+        self.global_env.define('str_split', builtin_str_split)
+        self.global_env.define('str_join', builtin_str_join)
 
     def interpret(self, program: Program):
         '''

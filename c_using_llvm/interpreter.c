@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
+#include <regex.h>
 #include "interpreter.h"
 #include "ast.h"
 
@@ -238,30 +239,88 @@ void env_set(Environment *env, char *name, Value *val) {
 }
 
 /* Built-in functions */
+static void print_value_recursive(Value *v) {
+    switch (v->type) {
+        case VAL_INT:
+            printf("%d", v->data.int_val);
+            break;
+        case VAL_FLOAT:
+            printf("%g", v->data.float_val);
+            break;
+        case VAL_STRING:
+            printf("\"%s\"", v->data.string_val);
+            break;
+        case VAL_BOOL:
+            printf("%s", v->data.bool_val ? "True" : "False");
+            break;
+        case VAL_NULL:
+            printf("None");
+            break;
+        case VAL_ARRAY: {
+            printf("[");
+            Array *arr = v->data.array_val;
+            for (int j = 0; j < arr->size; j++) {
+                print_value_recursive(arr->elements[j]);
+                if (j < arr->size - 1) printf(", ");
+            }
+            printf("]");
+            break;
+        }
+        case VAL_DICT: {
+            printf("{");
+            Dict *dict = v->data.dict_val;
+            int count = 0;
+            for (int j = 0; j < HASH_SIZE; j++) {
+                DictEntry *entry = dict->buckets[j];
+                while (entry != NULL) {
+                    if (count > 0) printf(", ");
+                    printf("\"%s\": ", entry->key);
+                    print_value_recursive(entry->value);
+                    entry = entry->next;
+                    count++;
+                }
+            }
+            printf("}");
+            break;
+        }
+        default:
+            printf("<object>");
+    }
+}
+
 static Value *builtin_print(Value **args, int arg_count) {
     for (int i = 0; i < arg_count; i++) {
         Value *v = args[i];
-        switch (v->type) {
-            case VAL_INT:
-                printf("%d", v->data.int_val);
-                break;
-            case VAL_FLOAT:
-                printf("%g", v->data.float_val);
-                break;
-            case VAL_STRING:
-                printf("%s", v->data.string_val);
-                break;
-            case VAL_BOOL:
-                printf("%s", v->data.bool_val ? "True" : "False");
-                break;
-            case VAL_NULL:
-                printf("None");
-                break;
-            default:
-                printf("<object>");
+        // For non-string types, print without quotes
+        if (v->type == VAL_STRING) {
+            printf("%s", v->data.string_val);
+        } else if (v->type == VAL_ARRAY || v->type == VAL_DICT) {
+            print_value_recursive(v);
+        } else {
+            switch (v->type) {
+                case VAL_INT:
+                    printf("%d", v->data.int_val);
+                    break;
+                case VAL_FLOAT:
+                    printf("%g", v->data.float_val);
+                    break;
+                case VAL_BOOL:
+                    printf("%s", v->data.bool_val ? "True" : "False");
+                    break;
+                case VAL_NULL:
+                    printf("None");
+                    break;
+                default:
+                    printf("<object>");
+            }
         }
         if (i < arg_count - 1) printf(" ");
     }
+    return create_null_value();
+}
+
+static Value *builtin_println(Value **args, int arg_count) {
+    builtin_print(args, arg_count);
     printf("\n");
     return create_null_value();
 }
@@ -467,8 +526,269 @@ static Value *builtin_write(Value **args, int arg_count) {
     return create_null_value();
 }
 
+
+static Value *builtin_regexp_match(Value **args, int arg_count) {
+    if (arg_count != 2) {
+        fprintf(stderr, "regexp_match() requires pattern and string\n");
+        exit(1);
+    }
+    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING) {
+        fprintf(stderr, "regexp_match() requires two string arguments\n");
+        exit(1);
+    }
+
+    char *pattern = args[0]->data.string_val;
+    char *str = args[1]->data.string_val;
+
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
+        regfree(&regex);
+        return create_int_value(0);
+    }
+
+    ret = regexec(&regex, str, 0, NULL, 0);
+    regfree(&regex);
+
+    return create_int_value((ret == 0) ? 1 : 0);
+}
+
+static Value *builtin_regexp_find(Value **args, int arg_count) {
+    if (arg_count != 2) {
+        fprintf(stderr, "regexp_find() requires pattern and string\n");
+        exit(1);
+    }
+    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING) {
+        fprintf(stderr, "regexp_find() requires two string arguments\n");
+        exit(1);
+    }
+
+    char *pattern = args[0]->data.string_val;
+    char *str = args[1]->data.string_val;
+
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
+        regfree(&regex);
+        return create_array_value();
+    }
+
+    // Get number of capture groups
+    size_t num_groups = regex.re_nsub + 1;  // +1 for the whole match
+    regmatch_t *matches = (regmatch_t*)malloc(num_groups * sizeof(regmatch_t));
+
+    // Find all matches
+    Value *result = create_array_value();
+    char *search_str = str;
+
+    while (regexec(&regex, search_str, num_groups, matches, 0) == 0) {
+        // If there are capture groups, return only the captured parts
+        // Otherwise return the whole match
+        int start_idx = (num_groups > 1) ? 1 : 0;  // Skip whole match if we have groups
+
+        for (size_t i = start_idx; i < num_groups; i++) {
+            if (matches[i].rm_so == -1) continue;  // This group didn't match
+
+            int match_len = matches[i].rm_eo - matches[i].rm_so;
+            char *matched = (char*)malloc(match_len + 1);
+            strncpy(matched, search_str + matches[i].rm_so, match_len);
+            matched[match_len] = '\0';
+
+            // Add to result array
+            Value *matched_val = create_string_value(matched);
+            array_append(result->data.array_val, matched_val);
+        }
+
+        // Move to next position after the whole match
+        int advance = matches[0].rm_eo;
+        if (advance == 0) {
+            if (*search_str == '\0') break;
+            search_str++;
+        } else {
+            search_str += advance;
+        }
+    }
+
+    free(matches);
+    regfree(&regex);
+    return result;
+}
+
+static Value *builtin_regexp_replace(Value **args, int arg_count) {
+    if (arg_count != 3) {
+        fprintf(stderr, "regexp_replace() requires pattern, string, and replacement\n");
+        exit(1);
+    }
+    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING || args[2]->type != VAL_STRING) {
+        fprintf(stderr, "regexp_replace() requires three string arguments\n");
+        exit(1);
+    }
+
+    char *pattern = args[0]->data.string_val;
+    char *str = args[1]->data.string_val;
+    char *replacement = args[2]->data.string_val;
+
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
+        regfree(&regex);
+        return create_string_value(strdup(str));
+    }
+
+    // Build result string
+    char *result_str = (char*)malloc(4096);
+    result_str[0] = '\0';
+    int result_pos = 0;
+
+    regmatch_t match;
+    char *search_str = str;
+
+    while (regexec(&regex, search_str, 1, &match, 0) == 0) {
+        // Copy text before match
+        int pre_len = match.rm_so;
+        if (result_pos + pre_len < 4096) {
+            strncat(result_str + result_pos, search_str, pre_len);
+            result_pos += pre_len;
+        }
+
+        // Copy replacement
+        int repl_len = strlen(replacement);
+        if (result_pos + repl_len < 4096) {
+            strcat(result_str + result_pos, replacement);
+            result_pos += repl_len;
+        }
+
+        // Move to next position
+        search_str += match.rm_eo;
+
+        // Prevent infinite loop on zero-length matches
+        if (match.rm_eo == 0) {
+            if (*search_str == '\0') break;
+            if (result_pos < 4095) {
+                result_str[result_pos++] = *search_str;
+                result_str[result_pos] = '\0';
+            }
+            search_str++;
+        }
+    }
+
+    // Copy remaining text
+    if (result_pos < 4096) {
+        strcat(result_str + result_pos, search_str);
+    }
+
+    regfree(&regex);
+    return create_string_value(result_str);
+}
+
+static Value *builtin_str_split(Value **args, int arg_count) {
+    if (arg_count != 2) {
+        fprintf(stderr, "str_split() requires string and separator\n");
+        exit(1);
+    }
+    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING) {
+        fprintf(stderr, "str_split() requires two string arguments\n");
+        exit(1);
+    }
+
+    char *str = args[0]->data.string_val;
+    char *separator = args[1]->data.string_val;
+    int sep_len = strlen(separator);
+
+    if (sep_len == 0) {
+        fprintf(stderr, "str_split separator cannot be empty\n");
+        exit(1);
+    }
+
+    Value *result = create_array_value();
+    char *current = str;
+    char *next;
+
+    while ((next = strstr(current, separator)) != NULL) {
+        // Extract substring before separator
+        int len = next - current;
+        char *part = (char*)malloc(len + 1);
+        strncpy(part, current, len);
+        part[len] = '\0';
+
+        // Add to result array
+        Value *part_val = create_string_value(part);
+        array_append(result->data.array_val, part_val);
+
+        // Move to position after separator
+        current = next + sep_len;
+    }
+
+    // Add remaining part after last separator
+    Value *last_val = create_string_value(strdup(current));
+    array_append(result->data.array_val, last_val);
+
+    return result;
+}
+
+static Value *builtin_str_join(Value **args, int arg_count) {
+    if (arg_count != 2) {
+        fprintf(stderr, "str_join() requires array and separator\n");
+        exit(1);
+    }
+    if (args[0]->type != VAL_ARRAY || args[1]->type != VAL_STRING) {
+        fprintf(stderr, "str_join() requires array and string separator\n");
+        exit(1);
+    }
+
+    Array *arr = args[0]->data.array_val;
+    char *separator = args[1]->data.string_val;
+
+    // Calculate total length needed
+    int total_len = 0;
+    for (int i = 0; i < arr->size; i++) {
+        Value *elem = arr->elements[i];
+        if (elem->type == VAL_STRING) {
+            total_len += strlen(elem->data.string_val);
+        } else if (elem->type == VAL_INT) {
+            total_len += 20;
+        } else {
+            total_len += 30;
+        }
+        
+        if (i < arr->size - 1) {
+            total_len += strlen(separator);
+        }
+    }
+
+    // Build result string
+    char *result_str = (char*)malloc(total_len + 1);
+    result_str[0] = '\0';
+
+    for (int i = 0; i < arr->size; i++) {
+        Value *elem = arr->elements[i];
+        char temp[128];
+        
+        if (elem->type == VAL_STRING) {
+            strcat(result_str, elem->data.string_val);
+        } else if (elem->type == VAL_INT) {
+            sprintf(temp, "%d", elem->data.int_val);
+            strcat(result_str, temp);
+        } else if (elem->type == VAL_FLOAT) {
+            sprintf(temp, "%g", elem->data.float_val);
+            strcat(result_str, temp);
+        } else {
+            strcat(result_str, "<object>");
+        }
+
+        if (i < arr->size - 1) {
+            strcat(result_str, separator);
+        }
+    }
+
+    return create_string_value(result_str);
+}
 static void setup_builtins() {
     env_define(global_env, "print", create_builtin_value(builtin_print));
+    env_define(global_env, "println", create_builtin_value(builtin_println));
     env_define(global_env, "len", create_builtin_value(builtin_len));
     env_define(global_env, "int", create_builtin_value(builtin_int));
     env_define(global_env, "float", create_builtin_value(builtin_float));
@@ -480,6 +800,11 @@ static void setup_builtins() {
     env_define(global_env, "input", create_builtin_value(builtin_input));
     env_define(global_env, "read", create_builtin_value(builtin_read));
     env_define(global_env, "write", create_builtin_value(builtin_write));
+    env_define(global_env, "regexp_match", create_builtin_value(builtin_regexp_match));
+    env_define(global_env, "regexp_find", create_builtin_value(builtin_regexp_find));
+    env_define(global_env, "regexp_replace", create_builtin_value(builtin_regexp_replace));
+    env_define(global_env, "str_split", create_builtin_value(builtin_str_split));
+    env_define(global_env, "str_join", create_builtin_value(builtin_str_join));
 }
 
 /* Evaluation functions */

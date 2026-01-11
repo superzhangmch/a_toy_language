@@ -280,7 +280,12 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @dict_keys(%%Value)\n"
         "declare %%Value @keys(%%Value)\n"
         "declare %%Value @in_operator(%%Value, %%Value)\n"
-        "declare %%Value @binary_op(%%Value, i32, %%Value)\n\n"
+        "declare %%Value @binary_op(%%Value, i32, %%Value)\n"
+        "declare %%Value @regexp_match(%%Value, %%Value)\n"
+        "declare %%Value @regexp_find(%%Value, %%Value)\n"
+        "declare %%Value @regexp_replace(%%Value, %%Value, %%Value)\n"
+        "declare %%Value @str_split(%%Value, %%Value)\n"
+        "declare %%Value @str_join(%%Value, %%Value)\n\n"
     );
 }
 
@@ -322,36 +327,10 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "declare void @free(i8*)\n"
         "declare i64 @strlen(i8*)\n"
         "declare i8* @strcpy(i8*, i8*)\n"
-        "declare i8* @strcat(i8*, i8*)\n\n"
+        "declare i8* @strcat(i8*, i8*)\n"
+        "declare void @print_value(%%Value)\n\n"
 
-        "@.str_int = private unnamed_addr constant [5 x i8] c\"%%ld \\00\", align 1\n"
-        "@.str_str = private unnamed_addr constant [3 x i8] c\"%%s\\00\", align 1\n"
         "@.str_newline = private unnamed_addr constant [2 x i8] c\"\\0A\\00\", align 1\n\n"
-
-        "define void @print_value(%%Value %%v) {\n"
-        "  %%type = extractvalue %%Value %%v, 0\n"
-        "  %%data = extractvalue %%Value %%v, 1\n"
-        "  %%is_int = icmp eq i32 %%type, 0\n"
-        "  %%is_string = icmp eq i32 %%type, 2\n"
-        "  br i1 %%is_int, label %%print_int, label %%check_string\n"
-        "\n"
-        "print_int:\n"
-        "  %%fmt_int = getelementptr [5 x i8], [5 x i8]* @.str_int, i64 0, i64 0\n"
-        "  call i32 (i8*, ...) @printf(i8* %%fmt_int, i64 %%data)\n"
-        "  ret void\n"
-        "\n"
-        "check_string:\n"
-        "  br i1 %%is_string, label %%print_string, label %%print_end\n"
-        "\n"
-        "print_string:\n"
-        "  %%str_ptr = inttoptr i64 %%data to i8*\n"
-        "  %%fmt_str = getelementptr [3 x i8], [3 x i8]* @.str_str, i64 0, i64 0\n"
-        "  call i32 (i8*, ...) @printf(i8* %%fmt_str, i8* %%str_ptr)\n"
-        "  ret void\n"
-        "\n"
-        "print_end:\n"
-        "  ret void\n"
-        "}\n\n"
     );
 }
 
@@ -589,6 +568,13 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
 
             // Check for built-in functions
             if (strcmp(node->data.func_call.name, "print") == 0) {
+                for (int i = 0; i < arg_count; i++) {
+                    emit_indent(gen);
+                    fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[i]);
+                }
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", result_var);
+            } else if (strcmp(node->data.func_call.name, "println") == 0) {
                 for (int i = 0; i < arg_count; i++) {
                     emit_indent(gen);
                     fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[i]);

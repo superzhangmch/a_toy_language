@@ -50,4 +50,16 @@ Value in_operator(Value left, Value right);
 // Binary operations (handles all types including string concatenation)
 Value binary_op(Value left, int op, Value right);
 
+// Regular expression functions
+Value regexp_match(Value pattern, Value str);
+Value regexp_find(Value pattern, Value str);
+Value regexp_replace(Value pattern, Value str, Value replacement);
+
+// String functions
+Value str_split(Value str, Value separator);
+Value str_join(Value arr, Value separator);
+
+// Print function (for LLVM codegen)
+void print_value(Value v);
+
 #endif

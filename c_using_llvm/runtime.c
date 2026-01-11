@@ -1,4 +1,5 @@
 #include "runtime.h"
+#include <regex.h>
 
 // Array structure
 typedef struct {
@@ -782,6 +783,362 @@ Value binary_op(Value left, int op, Value right) {
         default: {
             Value result = {TYPE_INT, 0};
             return result;
+        }
+    }
+}
+
+// Regular expression functions
+
+// regexp_match(pattern, str) -> returns 1 if match, 0 otherwise
+Value regexp_match(Value pattern_val, Value str_val) {
+    if (pattern_val.type != TYPE_STRING || str_val.type != TYPE_STRING) {
+        fprintf(stderr, "regexp_match requires two string arguments\n");
+        exit(1);
+    }
+
+    char *pattern = (char*)pattern_val.data;
+    char *str = (char*)str_val.data;
+
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
+        regfree(&regex);
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+
+    ret = regexec(&regex, str, 0, NULL, 0);
+    regfree(&regex);
+
+    Value result = {TYPE_INT, (ret == 0) ? 1 : 0};
+    return result;
+}
+
+// regexp_find(pattern, str) -> returns array of matched strings or capture groups
+Value regexp_find(Value pattern_val, Value str_val) {
+    if (pattern_val.type != TYPE_STRING || str_val.type != TYPE_STRING) {
+        fprintf(stderr, "regexp_find requires two string arguments\n");
+        exit(1);
+    }
+
+    char *pattern = (char*)pattern_val.data;
+    char *str = (char*)str_val.data;
+
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
+        regfree(&regex);
+        // Return empty array
+        return make_array();
+    }
+
+    // Get number of capture groups
+    size_t num_groups = regex.re_nsub + 1;  // +1 for the whole match
+    regmatch_t *matches = (regmatch_t*)malloc(num_groups * sizeof(regmatch_t));
+
+    // Find all matches
+    Array *result_arr = (Array*)calloc(1, sizeof(Array));
+    result_arr->size = 0;
+    result_arr->capacity = 10;
+    result_arr->data = calloc(result_arr->capacity, sizeof(Value));
+
+    char *search_str = str;
+
+    while (regexec(&regex, search_str, num_groups, matches, 0) == 0) {
+        // If there are capture groups, return only the captured parts
+        // Otherwise return the whole match
+        int start_idx = (num_groups > 1) ? 1 : 0;  // Skip whole match if we have groups
+
+        for (size_t i = start_idx; i < num_groups; i++) {
+            if (matches[i].rm_so == -1) continue;  // This group didn't match
+
+            int match_len = matches[i].rm_eo - matches[i].rm_so;
+            char *matched = (char*)malloc(match_len + 1);
+            strncpy(matched, search_str + matches[i].rm_so, match_len);
+            matched[match_len] = '\0';
+
+            // Add to result array
+            if (result_arr->size >= result_arr->capacity) {
+                result_arr->capacity *= 2;
+                result_arr->data = realloc(result_arr->data, result_arr->capacity * sizeof(Value));
+            }
+
+            Value matched_val = {TYPE_STRING, (long)matched};
+            ((Value*)result_arr->data)[result_arr->size++] = matched_val;
+        }
+
+        // Move to next position after the whole match
+        int advance = matches[0].rm_eo;
+        if (advance == 0) {
+            if (*search_str == '\0') break;
+            search_str++;
+        } else {
+            search_str += advance;
+        }
+    }
+
+    free(matches);
+    regfree(&regex);
+
+    Value result = {TYPE_ARRAY, (long)result_arr};
+    return result;
+}
+
+// regexp_replace(pattern, str, replacement) -> returns new string with replacements
+Value regexp_replace(Value pattern_val, Value str_val, Value replacement_val) {
+    if (pattern_val.type != TYPE_STRING || str_val.type != TYPE_STRING || replacement_val.type != TYPE_STRING) {
+        fprintf(stderr, "regexp_replace requires three string arguments\n");
+        exit(1);
+    }
+
+    char *pattern = (char*)pattern_val.data;
+    char *str = (char*)str_val.data;
+    char *replacement = (char*)replacement_val.data;
+
+    regex_t regex;
+    int ret = regcomp(&regex, pattern, REG_EXTENDED);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
+        regfree(&regex);
+        // Return original string
+        Value result = {TYPE_STRING, (long)strdup(str)};
+        return result;
+    }
+
+    // Build result string
+    char *result_str = (char*)malloc(4096);
+    result_str[0] = '\0';
+    int result_pos = 0;
+
+    regmatch_t match;
+    char *search_str = str;
+    int offset = 0;
+
+    while (regexec(&regex, search_str, 1, &match, 0) == 0) {
+        // Copy text before match
+        int pre_len = match.rm_so;
+        if (result_pos + pre_len < 4096) {
+            strncat(result_str + result_pos, search_str, pre_len);
+            result_pos += pre_len;
+        }
+
+        // Copy replacement
+        int repl_len = strlen(replacement);
+        if (result_pos + repl_len < 4096) {
+            strcat(result_str + result_pos, replacement);
+            result_pos += repl_len;
+        }
+
+        // Move to next position
+        search_str += match.rm_eo;
+
+        // Prevent infinite loop on zero-length matches
+        if (match.rm_eo == 0) {
+            if (*search_str == '\0') break;
+            if (result_pos < 4095) {
+                result_str[result_pos++] = *search_str;
+                result_str[result_pos] = '\0';
+            }
+            search_str++;
+        }
+    }
+
+    // Copy remaining text
+    if (result_pos < 4096) {
+        strcat(result_str + result_pos, search_str);
+    }
+
+    regfree(&regex);
+
+    Value result = {TYPE_STRING, (long)result_str};
+    return result;
+}
+
+// String utility functions
+
+// str_split(str, separator) -> returns array of strings
+Value str_split(Value str_val, Value sep_val) {
+    if (str_val.type != TYPE_STRING || sep_val.type != TYPE_STRING) {
+        fprintf(stderr, "str_split requires two string arguments\n");
+        exit(1);
+    }
+
+    char *str = (char*)str_val.data;
+    char *separator = (char*)sep_val.data;
+    int sep_len = strlen(separator);
+
+    if (sep_len == 0) {
+        fprintf(stderr, "str_split separator cannot be empty\n");
+        exit(1);
+    }
+
+    // Create result array
+    Array *result_arr = (Array*)calloc(1, sizeof(Array));
+    result_arr->size = 0;
+    result_arr->capacity = 10;
+    result_arr->data = calloc(result_arr->capacity, sizeof(Value));
+
+    char *current = str;
+    char *next;
+
+    while ((next = strstr(current, separator)) != NULL) {
+        // Extract substring before separator
+        int len = next - current;
+        char *part = (char*)malloc(len + 1);
+        strncpy(part, current, len);
+        part[len] = '\0';
+
+        // Add to result array
+        if (result_arr->size >= result_arr->capacity) {
+            result_arr->capacity *= 2;
+            result_arr->data = realloc(result_arr->data, result_arr->capacity * sizeof(Value));
+        }
+
+        Value part_val = {TYPE_STRING, (long)part};
+        ((Value*)result_arr->data)[result_arr->size++] = part_val;
+
+        // Move to position after separator
+        current = next + sep_len;
+    }
+
+    // Add remaining part after last separator
+    char *last_part = strdup(current);
+    if (result_arr->size >= result_arr->capacity) {
+        result_arr->capacity *= 2;
+        result_arr->data = realloc(result_arr->data, result_arr->capacity * sizeof(Value));
+    }
+    Value last_val = {TYPE_STRING, (long)last_part};
+    ((Value*)result_arr->data)[result_arr->size++] = last_val;
+
+    Value result = {TYPE_ARRAY, (long)result_arr};
+    return result;
+}
+
+// str_join(array, separator) -> returns joined string
+Value str_join(Value arr_val, Value sep_val) {
+    if (arr_val.type != TYPE_ARRAY || sep_val.type != TYPE_STRING) {
+        fprintf(stderr, "str_join requires array and string separator\n");
+        exit(1);
+    }
+
+    Array *arr = (Array*)(arr_val.data);
+    char *separator = (char*)sep_val.data;
+
+    // Calculate total length needed
+    int total_len = 0;
+    Value *elements = (Value*)(arr->data);
+    
+    for (int i = 0; i < arr->size; i++) {
+        if (elements[i].type == TYPE_STRING) {
+            total_len += strlen((char*)elements[i].data);
+        } else if (elements[i].type == TYPE_INT) {
+            total_len += 20;  // Enough for any int
+        } else {
+            total_len += 30;  // Enough for other types
+        }
+        
+        if (i < arr->size - 1) {
+            total_len += strlen(separator);
+        }
+    }
+
+    // Build result string
+    char *result_str = (char*)malloc(total_len + 1);
+    result_str[0] = '\0';
+
+    for (int i = 0; i < arr->size; i++) {
+        char temp[128];
+        
+        if (elements[i].type == TYPE_STRING) {
+            strcat(result_str, (char*)elements[i].data);
+        } else if (elements[i].type == TYPE_INT) {
+            sprintf(temp, "%ld", elements[i].data);
+            strcat(result_str, temp);
+        } else if (elements[i].type == TYPE_FLOAT) {
+            double f = *(double*)&elements[i].data;
+            sprintf(temp, "%g", f);
+            strcat(result_str, temp);
+        } else {
+            strcat(result_str, "<object>");
+        }
+
+        if (i < arr->size - 1) {
+            strcat(result_str, separator);
+        }
+    }
+
+    Value result = {TYPE_STRING, (long)result_str};
+    return result;
+}
+
+// Recursive print helper for arrays and dicts
+static void print_value_recursive(Value v) {
+    switch (v.type) {
+        case TYPE_INT:
+            printf("%ld", v.data);
+            break;
+        case TYPE_FLOAT: {
+            double *fp = (double*)&v.data;
+            printf("%g", *fp);
+            break;
+        }
+        case TYPE_STRING:
+            printf("\"%s\"", (char*)v.data);
+            break;
+        case TYPE_ARRAY: {
+            printf("[");
+            Array *arr = (Array*)v.data;
+            Value *elements = (Value*)arr->data;
+            for (int j = 0; j < arr->size; j++) {
+                print_value_recursive(elements[j]);
+                if (j < arr->size - 1) printf(", ");
+            }
+            printf("]");
+            break;
+        }
+        case TYPE_DICT: {
+            printf("{");
+            Dict *dict = (Dict*)v.data;
+            int count = 0;
+            for (int j = 0; j < HASH_SIZE; j++) {
+                DictEntry *entry = dict->buckets[j];
+                while (entry != NULL) {
+                    if (count > 0) printf(", ");
+                    printf("\"%s\": ", entry->key);
+                    print_value_recursive(entry->value);
+                    entry = entry->next;
+                    count++;
+                }
+            }
+            printf("}");
+            break;
+        }
+        default:
+            printf("<object>");
+    }
+}
+
+// Print a value (used by LLVM-generated code)
+void print_value(Value v) {
+    // For non-string types, print without outer quotes
+    if (v.type == TYPE_STRING) {
+        printf("%s", (char*)v.data);
+    } else if (v.type == TYPE_ARRAY || v.type == TYPE_DICT) {
+        print_value_recursive(v);
+    } else {
+        switch (v.type) {
+            case TYPE_INT:
+                printf("%ld", v.data);
+                break;
+            case TYPE_FLOAT: {
+                double *fp = (double*)&v.data;
+                printf("%g", *fp);
+                break;
+            }
+            default:
+                printf("<object>");
         }
     }
 }
