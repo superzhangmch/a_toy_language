@@ -24,6 +24,7 @@ Value append(Value arr, Value val);
 Value array_get(Value arr, Value index);
 Value array_set(Value arr, Value index, Value val);
 Value index_get(Value obj, Value index);  // Generic index access for array/dict/string
+Value index_set(Value obj, Value index, Value val);  // Generic index assignment for array/dict
 Value len(Value v);
 Value to_int(Value v);
 Value to_float(Value v);
@@ -41,5 +42,12 @@ Value dict_set(Value dict, Value key, Value val);
 Value dict_get(Value dict, Value key);
 Value dict_has(Value dict, Value key);
 Value dict_keys(Value dict);
+Value keys(Value dict);  // Alias for dict_keys (matches builtin name)
+
+// IN operator (element in array, key in dict, substring in string)
+Value in_operator(Value left, Value right);
+
+// Binary operations (handles all types including string concatenation)
+Value binary_op(Value left, int op, Value right);
 
 #endif

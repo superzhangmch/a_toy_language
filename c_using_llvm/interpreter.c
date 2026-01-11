@@ -560,6 +560,9 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_bool_value(1);
 
         case OP_LT:
+            if (left->type == VAL_STRING && right->type == VAL_STRING) {
+                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) < 0);
+            }
             if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
@@ -568,6 +571,9 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_bool_value(left->data.int_val < right->data.int_val);
 
         case OP_LE:
+            if (left->type == VAL_STRING && right->type == VAL_STRING) {
+                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) <= 0);
+            }
             if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
@@ -576,6 +582,9 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_bool_value(left->data.int_val <= right->data.int_val);
 
         case OP_GT:
+            if (left->type == VAL_STRING && right->type == VAL_STRING) {
+                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) > 0);
+            }
             if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
@@ -584,6 +593,9 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_bool_value(left->data.int_val > right->data.int_val);
 
         case OP_GE:
+            if (left->type == VAL_STRING && right->type == VAL_STRING) {
+                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) >= 0);
+            }
             if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
@@ -596,6 +608,63 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
 
         case OP_OR:
             return create_bool_value(is_truthy(left) || is_truthy(right));
+
+        case OP_IN:
+            // Check if left is in right (element in array, key in dict, substring in string)
+            if (right->type == VAL_ARRAY) {
+                // element in array
+                Array *arr = right->data.array_val;
+                for (int i = 0; i < arr->size; i++) {
+                    Value *elem = arr->elements[i];
+                    // Compare elements
+                    if (left->type == elem->type) {
+                        if (left->type == VAL_INT && left->data.int_val == elem->data.int_val) {
+                            return create_bool_value(1);
+                        }
+                        if (left->type == VAL_FLOAT && left->data.float_val == elem->data.float_val) {
+                            return create_bool_value(1);
+                        }
+                        if (left->type == VAL_STRING && strcmp(left->data.string_val, elem->data.string_val) == 0) {
+                            return create_bool_value(1);
+                        }
+                        if (left->type == VAL_BOOL && left->data.bool_val == elem->data.bool_val) {
+                            return create_bool_value(1);
+                        }
+                    }
+                }
+                return create_bool_value(0);
+            } else if (right->type == VAL_DICT) {
+                // key in dict
+                if (left->type != VAL_STRING) {
+                    fprintf(stderr, "Dictionary keys must be strings\n");
+                    exit(1);
+                }
+                Dict *dict = right->data.dict_val;
+                for (int i = 0; i < HASH_SIZE; i++) {
+                    DictEntry *entry = dict->buckets[i];
+                    while (entry != NULL) {
+                        if (strcmp(entry->key, left->data.string_val) == 0) {
+                            return create_bool_value(1);
+                        }
+                        entry = entry->next;
+                    }
+                }
+                return create_bool_value(0);
+            } else if (right->type == VAL_STRING) {
+                // substring in string
+                if (left->type != VAL_STRING) {
+                    fprintf(stderr, "Can only check if string is in string\n");
+                    exit(1);
+                }
+                if (strstr(right->data.string_val, left->data.string_val) != NULL) {
+                    return create_bool_value(1);
+                } else {
+                    return create_bool_value(0);
+                }
+            } else {
+                fprintf(stderr, "IN operator requires array, dict, or string on the right side\n");
+                exit(1);
+            }
 
         default:
             fprintf(stderr, "Unknown binary operator\n");

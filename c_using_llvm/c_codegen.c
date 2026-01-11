@@ -70,6 +70,16 @@ static void gen_expr(CCodeGen *gen, ASTNode *node) {
         }
 
         case NODE_BINARY_OP: {
+            // Special handling for IN operator
+            if (node->data.binary_op.op == OP_IN) {
+                fprintf(gen->out, "in_operator(");
+                gen_expr(gen, node->data.binary_op.left);
+                fprintf(gen->out, ", ");
+                gen_expr(gen, node->data.binary_op.right);
+                fprintf(gen->out, ")");
+                break;
+            }
+
             fprintf(gen->out, "binary_op(");
             gen_expr(gen, node->data.binary_op.left);
             fprintf(gen->out, ", ");

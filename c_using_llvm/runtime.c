@@ -93,6 +93,18 @@ Value array_set(Value arr, Value index, Value val) {
     return val;
 }
 
+// Generic index set (handles both array and dict)
+Value index_set(Value obj, Value index, Value val) {
+    if (obj.type == TYPE_ARRAY) {
+        return array_set(obj, index, val);
+    } else if (obj.type == TYPE_DICT) {
+        return dict_set(obj, index, val);
+    } else {
+        fprintf(stderr, "Error: Can only assign to array or dict indices\n");
+        exit(1);
+    }
+}
+
 // Get length
 Value len(Value v) {
     if (v.type == TYPE_ARRAY) {
@@ -456,4 +468,320 @@ Value dict_keys(Value dict) {
     }
 
     return arr;
+}
+
+// Alias for dict_keys (matches builtin name in interpreter)
+Value keys(Value dict) {
+    return dict_keys(dict);
+}
+
+// IN operator: check if left is in right (element in array, key in dict, substring in string)
+Value in_operator(Value left, Value right) {
+    if (right.type == TYPE_ARRAY) {
+        // Check if element is in array
+        Array *a = (Array*)(right.data);
+        Value *elements = (Value*)(a->data);
+
+        for (int i = 0; i < a->size; i++) {
+            Value elem = elements[i];
+
+            // Compare by type and value
+            if (left.type == elem.type) {
+                if (left.type == TYPE_INT && left.data == elem.data) {
+                    Value result = {TYPE_INT, 1};  // true
+                    return result;
+                } else if (left.type == TYPE_FLOAT && left.data == elem.data) {
+                    Value result = {TYPE_INT, 1};  // true
+                    return result;
+                } else if (left.type == TYPE_STRING) {
+                    char *left_str = (char*)(left.data);
+                    char *elem_str = (char*)(elem.data);
+                    if (strcmp(left_str, elem_str) == 0) {
+                        Value result = {TYPE_INT, 1};  // true
+                        return result;
+                    }
+                }
+            }
+        }
+
+        Value result = {TYPE_INT, 0};  // false
+        return result;
+
+    } else if (right.type == TYPE_DICT) {
+        // Check if key is in dict (use dict_has)
+        return dict_has(right, left);
+
+    } else if (right.type == TYPE_STRING) {
+        // Check if substring is in string
+        if (left.type != TYPE_STRING) {
+            fprintf(stderr, "Can only check if string is in string\n");
+            exit(1);
+        }
+
+        char *left_str = (char*)(left.data);
+        char *right_str = (char*)(right.data);
+
+        if (strstr(right_str, left_str) != NULL) {
+            Value result = {TYPE_INT, 1};  // true
+            return result;
+        } else {
+            Value result = {TYPE_INT, 0};  // false
+            return result;
+        }
+
+    } else {
+        fprintf(stderr, "IN operator requires array, dict, or string on the right side\n");
+        exit(1);
+    }
+}
+
+// Binary operations - handles all types including string concatenation
+Value binary_op(Value left, int op, Value right) {
+    // OP codes: ADD=0, SUB=1, MUL=2, DIV=3, MOD=4, EQ=5, NE=6, LT=7, LE=8, GT=9, GE=10
+    
+    switch (op) {
+        case 0: { // ADD
+            // String concatenation
+            if (left.type == TYPE_STRING || right.type == TYPE_STRING) {
+                char buf[1024];
+                char left_str[512], right_str[512];
+                
+                // Convert left to string
+                if (left.type == TYPE_STRING) {
+                    strncpy(left_str, (char*)left.data, sizeof(left_str) - 1);
+                    left_str[sizeof(left_str) - 1] = '\0';
+                } else if (left.type == TYPE_INT) {
+                    snprintf(left_str, sizeof(left_str), "%ld", left.data);
+                } else if (left.type == TYPE_FLOAT) {
+                    double f = *(double*)&left.data;
+                    snprintf(left_str, sizeof(left_str), "%g", f);
+                } else {
+                    left_str[0] = '\0';
+                }
+                
+                // Convert right to string
+                if (right.type == TYPE_STRING) {
+                    strncpy(right_str, (char*)right.data, sizeof(right_str) - 1);
+                    right_str[sizeof(right_str) - 1] = '\0';
+                } else if (right.type == TYPE_INT) {
+                    snprintf(right_str, sizeof(right_str), "%ld", right.data);
+                } else if (right.type == TYPE_FLOAT) {
+                    double f = *(double*)&right.data;
+                    snprintf(right_str, sizeof(right_str), "%g", f);
+                } else {
+                    right_str[0] = '\0';
+                }
+                
+                // Concatenate
+                snprintf(buf, sizeof(buf), "%s%s", left_str, right_str);
+                char *result_str = strdup(buf);
+                Value result = {TYPE_STRING, (long)result_str};
+                return result;
+            }
+            
+            // Numeric addition
+            if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                double sum = l + r;
+                Value result = {TYPE_FLOAT, *(long*)&sum};
+                return result;
+            } else {
+                long sum = left.data + right.data;
+                Value result = {TYPE_INT, sum};
+                return result;
+            }
+        }
+        
+        case 1: { // SUB
+            if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                double diff = l - r;
+                Value result = {TYPE_FLOAT, *(long*)&diff};
+                return result;
+            } else {
+                long diff = left.data - right.data;
+                Value result = {TYPE_INT, diff};
+                return result;
+            }
+        }
+        
+        case 2: { // MUL
+            if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                double prod = l * r;
+                Value result = {TYPE_FLOAT, *(long*)&prod};
+                return result;
+            } else {
+                long prod = left.data * right.data;
+                Value result = {TYPE_INT, prod};
+                return result;
+            }
+        }
+        
+        case 3: { // DIV
+            if (left.type == TYPE_INT && right.type == TYPE_INT) {
+                long quot = left.data / right.data;
+                Value result = {TYPE_INT, quot};
+                return result;
+            } else {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                double quot = l / r;
+                Value result = {TYPE_FLOAT, *(long*)&quot};
+                return result;
+            }
+        }
+        
+        case 4: { // MOD
+            long rem = left.data % right.data;
+            Value result = {TYPE_INT, rem};
+            return result;
+        }
+        
+        case 5: { // EQ
+            if (left.type != right.type) {
+                Value result = {TYPE_INT, 0};
+                return result;
+            }
+            if (left.type == TYPE_STRING) {
+                int eq = strcmp((char*)left.data, (char*)right.data) == 0;
+                Value result = {TYPE_INT, eq};
+                return result;
+            } else {
+                int eq = (left.data == right.data);
+                Value result = {TYPE_INT, eq};
+                return result;
+            }
+        }
+        
+        case 6: { // NE
+            if (left.type != right.type) {
+                Value result = {TYPE_INT, 1};
+                return result;
+            }
+            if (left.type == TYPE_STRING) {
+                int ne = strcmp((char*)left.data, (char*)right.data) != 0;
+                Value result = {TYPE_INT, ne};
+                return result;
+            } else {
+                int ne = (left.data != right.data);
+                Value result = {TYPE_INT, ne};
+                return result;
+            }
+        }
+        
+        case 7: { // LT
+            if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
+                int lt = strcmp((char*)left.data, (char*)right.data) < 0;
+                Value result = {TYPE_INT, lt};
+                return result;
+            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                Value result = {TYPE_INT, l < r};
+                return result;
+            } else {
+                Value result = {TYPE_INT, left.data < right.data};
+                return result;
+            }
+        }
+        
+        case 8: { // LE
+            if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
+                int le = strcmp((char*)left.data, (char*)right.data) <= 0;
+                Value result = {TYPE_INT, le};
+                return result;
+            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                Value result = {TYPE_INT, l <= r};
+                return result;
+            } else {
+                Value result = {TYPE_INT, left.data <= right.data};
+                return result;
+            }
+        }
+        
+        case 9: { // GT
+            if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
+                int gt = strcmp((char*)left.data, (char*)right.data) > 0;
+                Value result = {TYPE_INT, gt};
+                return result;
+            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                Value result = {TYPE_INT, l > r};
+                return result;
+            } else {
+                Value result = {TYPE_INT, left.data > right.data};
+                return result;
+            }
+        }
+        
+        case 10: { // GE
+            if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
+                int ge = strcmp((char*)left.data, (char*)right.data) >= 0;
+                Value result = {TYPE_INT, ge};
+                return result;
+            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                Value result = {TYPE_INT, l >= r};
+                return result;
+            } else {
+                Value result = {TYPE_INT, left.data >= right.data};
+                return result;
+            }
+        }
+
+        case 11: { // AND
+            // Check if left is truthy
+            int l_truthy = 0;
+            if (left.type == TYPE_INT) {
+                l_truthy = (left.data != 0);
+            } else {
+                l_truthy = (left.data != 0);  // Non-zero pointer means truthy
+            }
+
+            // Check if right is truthy
+            int r_truthy = 0;
+            if (right.type == TYPE_INT) {
+                r_truthy = (right.data != 0);
+            } else {
+                r_truthy = (right.data != 0);  // Non-zero pointer means truthy
+            }
+
+            Value result = {TYPE_INT, l_truthy && r_truthy};
+            return result;
+        }
+
+        case 12: { // OR
+            // Check if left is truthy
+            int l_truthy = 0;
+            if (left.type == TYPE_INT) {
+                l_truthy = (left.data != 0);
+            } else {
+                l_truthy = (left.data != 0);  // Non-zero pointer means truthy
+            }
+
+            // Check if right is truthy
+            int r_truthy = 0;
+            if (right.type == TYPE_INT) {
+                r_truthy = (right.data != 0);
+            } else {
+                r_truthy = (right.data != 0);  // Non-zero pointer means truthy
+            }
+
+            Value result = {TYPE_INT, l_truthy || r_truthy};
+            return result;
+        }
+
+        default: {
+            Value result = {TYPE_INT, 0};
+            return result;
+        }
+    }
 }

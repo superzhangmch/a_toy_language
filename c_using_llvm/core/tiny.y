@@ -219,6 +219,9 @@ comparison_expr:
     | comparison_expr GE additive_expr {
         $$ = create_binary_op($1, OP_GE, $3);
     }
+    | additive_expr IN additive_expr {
+        $$ = create_binary_op($1, OP_IN, $3);
+    }
     ;
 
 additive_expr:

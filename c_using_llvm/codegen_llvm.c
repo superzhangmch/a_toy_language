@@ -9,7 +9,9 @@ void llvm_codegen_init(LLVMCodeGen *gen, FILE *out) {
     gen->temp_counter = 0;
     gen->label_counter = 0;
     gen->string_counter = 0;
+    gen->scope_counter = 0;
     gen->strings = NULL;
+    gen->var_mappings = NULL;
 }
 
 static void emit_indent(LLVMCodeGen *gen) {
@@ -27,6 +29,35 @@ static char* new_temp(LLVMCodeGen *gen) {
 // Forward declarations
 static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var);
 static void gen_statement(LLVMCodeGen *gen, ASTNode *node);
+
+// Get unique name for an existing variable (lookup only)
+static const char* get_unique_var_name(LLVMCodeGen *gen, const char *original_name) {
+    // Look up in reverse order (most recent first)
+    VarMapping *m = gen->var_mappings;
+    while (m != NULL) {
+        if (strcmp(m->original_name, original_name) == 0) {
+            return m->unique_name;
+        }
+        m = m->next;
+    }
+
+    // If not found, return NULL (this indicates a bug - variable not declared)
+    fprintf(stderr, "Internal error: Variable '%s' not found in mapping\n", original_name);
+    return original_name;
+}
+
+// Create a new unique name for a variable declaration (always creates new)
+static const char* create_unique_var_name(LLVMCodeGen *gen, const char *original_name) {
+    // Always create new mapping with unique suffix
+    VarMapping *new_mapping = malloc(sizeof(VarMapping));
+    new_mapping->original_name = strdup(original_name);
+    new_mapping->unique_name = malloc(256);
+    snprintf(new_mapping->unique_name, 256, "%s_%d", original_name, gen->scope_counter++);
+    new_mapping->next = gen->var_mappings;
+    gen->var_mappings = new_mapping;
+
+    return new_mapping->unique_name;
+}
 
 // Helper to register a string literal and return its global name
 static const char* register_string_literal(LLVMCodeGen *gen, const char *str) {
@@ -231,6 +262,7 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @array_get(%%Value, %%Value)\n"
         "declare %%Value @array_set(%%Value, %%Value, %%Value)\n"
         "declare %%Value @index_get(%%Value, %%Value)\n"
+        "declare %%Value @index_set(%%Value, %%Value, %%Value)\n"
         "declare %%Value @len(%%Value)\n"
         "declare %%Value @str(%%Value)\n"
         "declare %%Value @type(%%Value)\n"
@@ -245,7 +277,10 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @dict_set(%%Value, %%Value, %%Value)\n"
         "declare %%Value @dict_get(%%Value, %%Value)\n"
         "declare %%Value @dict_has(%%Value, %%Value)\n"
-        "declare %%Value @dict_keys(%%Value)\n\n"
+        "declare %%Value @dict_keys(%%Value)\n"
+        "declare %%Value @keys(%%Value)\n"
+        "declare %%Value @in_operator(%%Value, %%Value)\n"
+        "declare %%Value @binary_op(%%Value, i32, %%Value)\n\n"
     );
 }
 
@@ -282,70 +317,6 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "  ret i32 %%result\n"
         "}\n\n"
 
-        "define %%Value @binary_op(%%Value %%left, i32 %%op, %%Value %%right) {\n"
-        "entry:\n"
-        "  %%l_data = extractvalue %%Value %%left, 1\n"
-        "  %%r_data = extractvalue %%Value %%right, 1\n"
-        "  switch i32 %%op, label %%default [\n"
-        "    i32 0, label %%op_add\n"
-        "    i32 1, label %%op_sub\n"
-        "    i32 2, label %%op_mul\n"
-        "    i32 3, label %%op_div\n"
-        "    i32 4, label %%op_mod\n"
-        "    i32 5, label %%op_eq\n"
-        "    i32 6, label %%op_ne\n"
-        "    i32 7, label %%op_lt\n"
-        "    i32 8, label %%op_le\n"
-        "    i32 9, label %%op_gt\n"
-        "    i32 10, label %%op_ge\n"
-        "  ]\n"
-        "op_add:\n"
-        "  %%add_result = add i64 %%l_data, %%r_data\n"
-        "  br label %%done\n"
-        "op_sub:\n"
-        "  %%sub_result = sub i64 %%l_data, %%r_data\n"
-        "  br label %%done\n"
-        "op_mul:\n"
-        "  %%mul_result = mul i64 %%l_data, %%r_data\n"
-        "  br label %%done\n"
-        "op_div:\n"
-        "  %%div_result = sdiv i64 %%l_data, %%r_data\n"
-        "  br label %%done\n"
-        "op_mod:\n"
-        "  %%mod_result = srem i64 %%l_data, %%r_data\n"
-        "  br label %%done\n"
-        "op_eq:\n"
-        "  %%eq_cmp = icmp eq i64 %%l_data, %%r_data\n"
-        "  %%eq_val = select i1 %%eq_cmp, i64 1, i64 0\n"
-        "  br label %%done\n"
-        "op_ne:\n"
-        "  %%ne_cmp = icmp ne i64 %%l_data, %%r_data\n"
-        "  %%ne_val = select i1 %%ne_cmp, i64 1, i64 0\n"
-        "  br label %%done\n"
-        "op_lt:\n"
-        "  %%lt_cmp = icmp slt i64 %%l_data, %%r_data\n"
-        "  %%lt_val = select i1 %%lt_cmp, i64 1, i64 0\n"
-        "  br label %%done\n"
-        "op_le:\n"
-        "  %%le_cmp = icmp sle i64 %%l_data, %%r_data\n"
-        "  %%le_val = select i1 %%le_cmp, i64 1, i64 0\n"
-        "  br label %%done\n"
-        "op_gt:\n"
-        "  %%gt_cmp = icmp sgt i64 %%l_data, %%r_data\n"
-        "  %%gt_val = select i1 %%gt_cmp, i64 1, i64 0\n"
-        "  br label %%done\n"
-        "op_ge:\n"
-        "  %%ge_cmp = icmp sge i64 %%l_data, %%r_data\n"
-        "  %%ge_val = select i1 %%ge_cmp, i64 1, i64 0\n"
-        "  br label %%done\n"
-        "default:\n"
-        "  br label %%done\n"
-        "done:\n"
-        "  %%final = phi i64 [ %%add_result, %%op_add ], [ %%sub_result, %%op_sub ], [ %%mul_result, %%op_mul ], [ %%div_result, %%op_div ], [ %%mod_result, %%op_mod ], [ %%eq_val, %%op_eq ], [ %%ne_val, %%op_ne ], [ %%lt_val, %%op_lt ], [ %%le_val, %%op_le ], [ %%gt_val, %%op_gt ], [ %%ge_val, %%op_ge ], [ 0, %%default ]\n"
-        "  %%result = call %%Value @make_int(i64 %%final)\n"
-        "  ret %%Value %%result\n"
-        "}\n\n"
-
         "declare i32 @printf(i8*, ...)\n"
         "declare i8* @malloc(i64)\n"
         "declare void @free(i8*)\n"
@@ -354,7 +325,8 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "declare i8* @strcat(i8*, i8*)\n\n"
 
         "@.str_int = private unnamed_addr constant [5 x i8] c\"%%ld \\00\", align 1\n"
-        "@.str_str = private unnamed_addr constant [3 x i8] c\"%%s\\00\", align 1\n\n"
+        "@.str_str = private unnamed_addr constant [3 x i8] c\"%%s\\00\", align 1\n"
+        "@.str_newline = private unnamed_addr constant [2 x i8] c\"\\0A\\00\", align 1\n\n"
 
         "define void @print_value(%%Value %%v) {\n"
         "  %%type = extractvalue %%Value %%v, 0\n"
@@ -402,9 +374,10 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
         }
 
         case NODE_IDENTIFIER: {
+            const char *unique_name = get_unique_var_name(gen, node->data.identifier.name);
             emit_indent(gen);
             fprintf(gen->out, "%s = load %%Value, %%Value* %%%s\n",
-                    result_var, node->data.identifier.name);
+                    result_var, unique_name);
             break;
         }
 
@@ -416,6 +389,14 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
 
             gen_expr(gen, node->data.binary_op.left, left_temp);
             gen_expr(gen, node->data.binary_op.right, right_temp);
+
+            // Special handling for IN operator
+            if (node->data.binary_op.op == OP_IN) {
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @in_operator(%%Value %s, %%Value %s)\n",
+                        result_var, left_temp, right_temp);
+                break;
+            }
 
             int op_code = 0;
             switch (node->data.binary_op.op) {
@@ -430,6 +411,8 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 case OP_LE: op_code = 8; break;
                 case OP_GT: op_code = 9; break;
                 case OP_GE: op_code = 10; break;
+                case OP_AND: op_code = 11; break;
+                case OP_OR: op_code = 12; break;
                 default: op_code = 0; break;
             }
 
@@ -610,6 +593,13 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                     emit_indent(gen);
                     fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[i]);
                 }
+                // Print newline after all arguments
+                char newline_temp[32];
+                snprintf(newline_temp, sizeof(newline_temp), "%%t%d", gen->temp_counter++);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = getelementptr [2 x i8], [2 x i8]* @.str_newline, i64 0, i64 0\n", newline_temp);
+                emit_indent(gen);
+                fprintf(gen->out, "call i32 (i8*, ...) @printf(i8* %s)\n", newline_temp);
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", result_var);
             } else {
@@ -640,9 +630,12 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
 static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
     switch (node->type) {
         case NODE_VAR_DECL: {
+            // Create unique name for this new variable declaration
+            const char *unique_name = create_unique_var_name(gen, node->data.var_decl.name);
+
             // Allocate space on stack
             emit_indent(gen);
-            fprintf(gen->out, "%%%s = alloca %%Value\n", node->data.var_decl.name);
+            fprintf(gen->out, "%%%s = alloca %%Value\n", unique_name);
 
             // Evaluate initial value
             char val_temp[32];
@@ -652,7 +645,7 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             // Store to variable
             emit_indent(gen);
             fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n",
-                    val_temp, node->data.var_decl.name);
+                    val_temp, unique_name);
             break;
         }
 
@@ -664,11 +657,12 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
 
             // Store to variable or array element
             if (node->data.assignment.target->type == NODE_IDENTIFIER) {
+                const char *unique_name = get_unique_var_name(gen, node->data.assignment.target->data.identifier.name);
                 emit_indent(gen);
                 fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n",
-                        val_temp, node->data.assignment.target->data.identifier.name);
+                        val_temp, unique_name);
             } else if (node->data.assignment.target->type == NODE_INDEX_ACCESS) {
-                // Array assignment: array_set(arr, idx, val)
+                // Index assignment: index_set(obj, idx, val) - handles both array and dict
                 char obj_temp[32];
                 char idx_temp[32];
                 snprintf(obj_temp, sizeof(obj_temp), "%%t%d", gen->temp_counter++);
@@ -680,7 +674,7 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 char result_temp[32];
                 snprintf(result_temp, sizeof(result_temp), "%%t%d", gen->temp_counter++);
                 emit_indent(gen);
-                fprintf(gen->out, "%s = call %%Value @array_set(%%Value %s, %%Value %s, %%Value %s)\n",
+                fprintf(gen->out, "%s = call %%Value @index_set(%%Value %s, %%Value %s, %%Value %s)\n",
                         result_temp, obj_temp, idx_temp, val_temp);
             }
             break;
@@ -832,9 +826,9 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @len(%%Value %s)\n", len_temp, collection_temp);
 
-                // Allocate loop variables
-                const char *key_var = node->data.foreach_stmt.key_var;
-                const char *value_var = node->data.foreach_stmt.value_var;
+                // Allocate loop variables with unique names (these are new declarations)
+                const char *key_var = create_unique_var_name(gen, node->data.foreach_stmt.key_var);
+                const char *value_var = create_unique_var_name(gen, node->data.foreach_stmt.value_var);
 
                 emit_indent(gen);
                 fprintf(gen->out, "%%%s = alloca %%Value\n", key_var);

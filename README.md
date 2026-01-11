@@ -29,6 +29,13 @@ var arr = [1, 2, 3, 4, 5]
 var slice = arr[1:4]  # [2, 3, 4]
 ```
 
+in 语法: 
+```python
+"substr" in "string"
+"ele" in ["ele", "abc", 11]
+"k0" in {"k0": 1, "k1": "a"}
+```
+
 ### 操作符
 - 算术: `+`, `-`, `*`, `/`, `%`
 - 比较: `==`, `!=`, `<`, `<=`, `>`, `>=`
@@ -49,18 +56,17 @@ if (condition) {
 # 循环
 while (condition) {
     ...
-    break
-    continue
+    break/continue
 }
 
 # 遍历
 
 foreach (key => val in $dict) {
-   ...
+   .../break/continue/...
 }
 
 foreach (idx => list[idx] in $list) {
-   ...
+   .../break/continue/...
 }
 
 ```
