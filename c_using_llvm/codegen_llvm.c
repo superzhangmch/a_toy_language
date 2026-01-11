@@ -332,7 +332,8 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "declare void @print_value(%%Value)\n"
         "declare void @set_cmd_args(i32, i8**)\n\n"
 
-        "@.str_newline = private unnamed_addr constant [2 x i8] c\"\\0A\\00\", align 1\n\n"
+        "@.str_newline = private unnamed_addr constant [2 x i8] c\"\\0A\\00\", align 1\n"
+        "@.str_space = private unnamed_addr constant [2 x i8] c\" \\00\", align 1\n\n"
     );
 }
 
@@ -573,6 +574,15 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 for (int i = 0; i < arg_count; i++) {
                     emit_indent(gen);
                     fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[i]);
+                    // Print space between arguments (but not after the last one)
+                    if (i < arg_count - 1) {
+                        char space_temp[32];
+                        snprintf(space_temp, sizeof(space_temp), "%%t%d", gen->temp_counter++);
+                        emit_indent(gen);
+                        fprintf(gen->out, "%s = getelementptr [2 x i8], [2 x i8]* @.str_space, i64 0, i64 0\n", space_temp);
+                        emit_indent(gen);
+                        fprintf(gen->out, "call i32 (i8*, ...) @printf(i8* %s)\n", space_temp);
+                    }
                 }
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", result_var);
@@ -580,6 +590,15 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 for (int i = 0; i < arg_count; i++) {
                     emit_indent(gen);
                     fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[i]);
+                    // Print space between arguments (but not after the last one)
+                    if (i < arg_count - 1) {
+                        char space_temp[32];
+                        snprintf(space_temp, sizeof(space_temp), "%%t%d", gen->temp_counter++);
+                        emit_indent(gen);
+                        fprintf(gen->out, "%s = getelementptr [2 x i8], [2 x i8]* @.str_space, i64 0, i64 0\n", space_temp);
+                        emit_indent(gen);
+                        fprintf(gen->out, "call i32 (i8*, ...) @printf(i8* %s)\n", space_temp);
+                    }
                 }
                 // Print newline after all arguments
                 char newline_temp[32];

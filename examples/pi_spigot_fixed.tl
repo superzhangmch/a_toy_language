@@ -39,7 +39,7 @@ while (c > 0) {
 
     # Print 4-digit group
     var result = e + d / a
-    print(result)
+    print(result, " ")
 
     e = d % a
     c = c - 14

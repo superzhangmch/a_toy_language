@@ -2,8 +2,8 @@
 
 ```
 $ROOT/
-├── py/              # Python 解释器实现
-├── c_using_llvm/    # C/LLVM 编译器实现
+├── py/              # Python 来实现它(解释执行)
+├── c_using_llvm/    # C/LLVM 来实现
 └── examples/        # 示例程序
 ```
 
@@ -29,18 +29,17 @@ var arr = [1, 2, 3, 4, 5]
 var slice = arr[1:4]  # [2, 3, 4]
 ```
 
-in 语法: 
-```python
-"substr" in "string"
-"ele" in ["ele", "abc", 11]
-"k0" in {"k0": 1, "k1": "a"}
-```
-
 ### 操作符
 - 算术: `+`, `-`, `*`, `/`, `%`
 - 比较: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - 逻辑: `&&`, `||`, `!`
 - 复合赋值: `+=`, `-=`, `*=`, `/=`
+- in 语法(返回 true | false): 
+```python
+"substr" in "string"
+"ele" in ["ele", "abc", 11]
+"k0" in {"k0": 1, "k1": "a"}
+```
 
 ### 控制流
 ```python

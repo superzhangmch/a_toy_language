@@ -1,13 +1,13 @@
 # Word Frequency Counter - Using IN operator with dict
 # Much cleaner and faster than parallel arrays!
 
-var file_path = "/Users/zhangmiaochang/Desktop/tmp/a_toy_language/c_using_llvm/interpreter.c"
+var file_path = cmd_args()[0]
 var content = read(file_path)
 
-print("=== Word Frequency Counter (With IN operator) ===")
-print("File: interpreter.c")
-print("File size: ", len(content), " characters")
-print("")
+println("=== Word Frequency Counter (With IN operator) ===")
+println("File: interpreter.c")
+println("File size: ", len(content), " characters")
+println("")
 
 # Now we can use a DICT instead of parallel arrays!
 var freq_dict = {}
@@ -55,7 +55,7 @@ if (len(current_word) > 0) {
     }
 }
 
-print("Total words: ", total_words)
+println("Total words: ", total_words)
 
 # Convert dict to arrays for sorting
 var word_list = []
@@ -67,11 +67,11 @@ foreach(i => word in keys) {
     append(freq_list, freq_dict[word])
 }
 
-print("Unique words: ", len(word_list))
-print("")
+println("Unique words: ", len(word_list))
+println("")
 
 # Bubble sort by frequency (descending)
-print("Sorting...")
+println("Sorting...")
 var n = len(word_list)
 var pass = 0
 
@@ -92,15 +92,15 @@ while (pass < n - 1) {
     pass += 1
 }
 
-print("")
-print("=== Top 30 Most Frequent Words ===")
-print("")
+println("")
+println("=== Top 30 Most Frequent Words ===")
+println("")
 
 var idx = 0
 while (idx < 30 and idx < len(word_list)) {
-    print(idx + 1, ". ", word_list[idx], ": ", freq_list[idx])
+    println(idx + 1, ". ", word_list[idx], ": ", freq_list[idx])
     idx += 1
 }
 
-print("")
-print("Done!")
+println("")
+println("Done!")
