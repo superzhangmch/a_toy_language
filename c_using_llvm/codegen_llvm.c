@@ -285,7 +285,8 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @regexp_find(%%Value, %%Value)\n"
         "declare %%Value @regexp_replace(%%Value, %%Value, %%Value)\n"
         "declare %%Value @str_split(%%Value, %%Value)\n"
-        "declare %%Value @str_join(%%Value, %%Value)\n\n"
+        "declare %%Value @str_join(%%Value, %%Value)\n"
+        "declare %%Value @cmd_args()\n\n"
     );
 }
 
@@ -328,7 +329,8 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "declare i64 @strlen(i8*)\n"
         "declare i8* @strcpy(i8*, i8*)\n"
         "declare i8* @strcat(i8*, i8*)\n"
-        "declare void @print_value(%%Value)\n\n"
+        "declare void @print_value(%%Value)\n"
+        "declare void @set_cmd_args(i32, i8**)\n\n"
 
         "@.str_newline = private unnamed_addr constant [2 x i8] c\"\\0A\\00\", align 1\n\n"
     );
@@ -589,9 +591,17 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", result_var);
             } else {
+                // Map builtin function names to runtime function names
+                const char *runtime_name = node->data.func_call.name;
+                if (strcmp(node->data.func_call.name, "int") == 0) {
+                    runtime_name = "to_int";
+                } else if (strcmp(node->data.func_call.name, "float") == 0) {
+                    runtime_name = "to_float";
+                }
+
                 // User function call
                 emit_indent(gen);
-                fprintf(gen->out, "%s = call %%Value @%s(", result_var, node->data.func_call.name);
+                fprintf(gen->out, "%s = call %%Value @%s(", result_var, runtime_name);
                 for (int i = 0; i < arg_count; i++) {
                     if (i > 0) fprintf(gen->out, ", ");
                     fprintf(gen->out, "%%Value %s", arg_temps[i]);
@@ -1030,8 +1040,12 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
 
     // Generate main function
     fprintf(gen->out, "; ===== Main Function =====\n\n");
-    fprintf(gen->out, "define i32 @main() {\n");
+    fprintf(gen->out, "define i32 @main(i32 %%argc, i8** %%argv) {\n");
     gen->indent_level = 1;
+
+    // Call set_cmd_args to store command line arguments
+    emit_indent(gen);
+    fprintf(gen->out, "call void @set_cmd_args(i32 %%argc, i8** %%argv)\n\n");
 
     stmt = root->data.program.statements;
     while (stmt != NULL) {

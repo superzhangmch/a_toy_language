@@ -16,6 +16,10 @@ static Value *return_value;
 static Environment *global_env;
 static Environment *current_env;
 
+// Global storage for command line arguments
+static int g_argc = 0;
+static char **g_argv = NULL;
+
 /* Forward declarations */
 static Value *eval_expression(ASTNode *node);
 static void eval_statement(ASTNode *node);
@@ -786,6 +790,16 @@ static Value *builtin_str_join(Value **args, int arg_count) {
 
     return create_string_value(result_str);
 }
+
+static Value *builtin_cmd_args(Value **args, int arg_count) {
+    Value *result = create_array_value();
+    // Start from index 2 to skip the program name (argv[0]) and script name (argv[1])
+    for (int i = 2; i < g_argc; i++) {
+        array_append(result->data.array_val, create_string_value(g_argv[i]));
+    }
+    return result;
+}
+
 static void setup_builtins() {
     env_define(global_env, "print", create_builtin_value(builtin_print));
     env_define(global_env, "println", create_builtin_value(builtin_println));
@@ -805,6 +819,7 @@ static void setup_builtins() {
     env_define(global_env, "regexp_replace", create_builtin_value(builtin_regexp_replace));
     env_define(global_env, "str_split", create_builtin_value(builtin_str_split));
     env_define(global_env, "str_join", create_builtin_value(builtin_str_join));
+    env_define(global_env, "cmd_args", create_builtin_value(builtin_cmd_args));
 }
 
 /* Evaluation functions */
@@ -1329,6 +1344,11 @@ static void eval_statement(ASTNode *node) {
             eval_expression(node);
             break;
     }
+}
+
+void set_cmd_args(int argc, char **argv) {
+    g_argc = argc;
+    g_argv = argv;
 }
 
 void interpret(ASTNode *root) {

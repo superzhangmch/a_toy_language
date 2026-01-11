@@ -8,6 +8,9 @@ extern FILE *yyin;
 extern ASTNode *root;
 
 int main(int argc, char **argv) {
+    // Set command line arguments for cmd_args() builtin
+    set_cmd_args(argc, argv);
+
     if (argc > 1) {
         yyin = fopen(argv[1], "r");
         if (!yyin) {

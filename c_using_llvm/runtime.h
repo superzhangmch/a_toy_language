@@ -62,4 +62,8 @@ Value str_join(Value arr, Value separator);
 // Print function (for LLVM codegen)
 void print_value(Value v);
 
+// Command line arguments
+void set_cmd_args(int argc, char **argv);
+Value cmd_args(void);
+
 #endif

@@ -101,6 +101,7 @@ Value *env_get(Environment *env, char *name);
 void env_set(Environment *env, char *name, Value *val);
 
 /* Interpreter functions */
+void set_cmd_args(int argc, char **argv);
 void interpret(ASTNode *root);
 
 #endif /* INTERPRETER_H */

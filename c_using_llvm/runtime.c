@@ -1,6 +1,10 @@
 #include "runtime.h"
 #include <regex.h>
 
+// Global storage for command line arguments
+static int g_argc = 0;
+static char **g_argv = NULL;
+
 // Array structure
 typedef struct {
     int size;
@@ -129,6 +133,12 @@ Value to_int(Value v) {
         Value result = {TYPE_INT, (long)f};
         return result;
     }
+    if (v.type == TYPE_STRING) {
+        char *str = (char*)v.data;
+        long val = atol(str);  // Use atol for long conversion
+        Value result = {TYPE_INT, val};
+        return result;
+    }
     Value result = {TYPE_INT, 0};
     return result;
 }
@@ -137,6 +147,12 @@ Value to_float(Value v) {
     if (v.type == TYPE_FLOAT) return v;
     if (v.type == TYPE_INT) {
         double f = (double)v.data;
+        Value result = {TYPE_FLOAT, *(long*)&f};
+        return result;
+    }
+    if (v.type == TYPE_STRING) {
+        char *str = (char*)v.data;
+        double f = atof(str);
         Value result = {TYPE_FLOAT, *(long*)&f};
         return result;
     }
@@ -1141,4 +1157,34 @@ void print_value(Value v) {
                 printf("<object>");
         }
     }
+}
+
+// Set command line arguments (called from main)
+void set_cmd_args(int argc, char **argv) {
+    g_argc = argc;
+    g_argv = argv;
+}
+
+// Get command line arguments (called from LLVM generated code)
+Value cmd_args(void) {
+    Array *arr = new_array();
+    // Start from index 1 to skip the executable name (argv[0])
+    // In LLVM compiled code, argv[0] is the executable (e.g., "a.out")
+    // argv[1] and beyond are the actual arguments passed to the program
+    for (int i = 1; i < g_argc; i++) {
+        int len = strlen(g_argv[i]);
+        char *str_copy = malloc(len + 1);
+        strcpy(str_copy, g_argv[i]);
+        Value str_val = {TYPE_STRING, (long)str_copy};
+
+        Value *elements = (Value*)arr->data;
+        if (arr->size >= arr->capacity) {
+            arr->capacity *= 2;
+            arr->data = realloc(arr->data, arr->capacity * sizeof(Value));
+            elements = (Value*)arr->data;
+        }
+        elements[arr->size++] = str_val;
+    }
+    Value result = {TYPE_ARRAY, (long)arr};
+    return result;
 }

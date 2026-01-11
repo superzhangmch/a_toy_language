@@ -5,6 +5,7 @@ Executes the AST
 通过执行 Interpreter.interpret(): 内部是循环执行 AST 中的各个 statement(语句)
 """
 
+import sys
 from typing import Any, Dict, List, Optional
 from ast_nodes_2 import *
 
@@ -207,6 +208,12 @@ class Interpreter:
                 raise Exception("str_join() separator must be a string")
             return separator.join(str(x) for x in arr)
 
+        def builtin_cmd_args():
+            """Get command line arguments (excluding interpreter and script name)"""
+            # sys.argv[0] is 'main.py', sys.argv[1] is the script file
+            # sys.argv[2:] are the actual arguments passed to the script
+            return sys.argv[2:] if len(sys.argv) > 2 else []
+
         self.global_env.define('print', builtin_print)
         self.global_env.define('println', builtin_println)
         self.global_env.define('len', builtin_len)
@@ -228,6 +235,7 @@ class Interpreter:
         self.global_env.define('regexp_replace', builtin_regexp_replace)
         self.global_env.define('str_split', builtin_str_split)
         self.global_env.define('str_join', builtin_str_join)
+        self.global_env.define('cmd_args', builtin_cmd_args)
 
     def interpret(self, program: Program):
         '''
