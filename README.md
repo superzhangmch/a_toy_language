@@ -108,7 +108,7 @@ print(result)  # 输出: 3628800
 
 - `cmd_args()` - 获得命令行参数
 
-note: llvm 模式, 复杂函数是怎么变异成 binary 的? c 语言实现并编译成 bin, 然后 llvm 直接调用 c 实现
+note: llvm 模式, 复杂函数是怎么编译成 binary 的? c 语言实现并编译成 bin, 然后 llvm 直接调用 c 实现
 
 
 ### 其他
