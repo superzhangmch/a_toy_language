@@ -18,6 +18,7 @@ var a = '1'; # 一次定义一个, 必须当场赋值
 
 ### 数据类型
 - **int**: 整数
+- **bool**: true|false
 - **float**: 浮点数
 - **string**: 字符串
 - **array**: 数组
