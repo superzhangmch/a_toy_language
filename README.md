@@ -122,6 +122,19 @@ println(c.label())
 println(c.copySecret(c))
 ```
 
+### 异常处理
+```python
+try {
+  ... code 
+} catch err_msg {
+  ... 
+}
+
+# how to raise an exception
+raise('err-msg')
+assert(false, 'err-msg')
+```
+
 ### include/include_once
 ```
 include $code_file
@@ -157,7 +170,9 @@ include_once $code_file
 - `str_join(str_list, seperator)`
 
 - `json_encode(list|dict|int|..)`
-- `json_decode(str) => list|dict|int|..)` - str: pseudo-json, 单双引号都行, list或dict最后一个元素后可以有逗号
+- `json_decode(json_str) => list|dict|int|..)` 
+  - json_str: pseudo-json, 单双引号都行, list或dict最后一个元素后可以有逗号
+  - 如果届时失败, 抛异常
 
 - `cmd_args()` - 获得命令行参数
 
