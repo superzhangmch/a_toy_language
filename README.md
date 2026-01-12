@@ -17,12 +17,13 @@ var a = '1'; # 一次定义一个, 必须当场赋值
 ```
 
 ### 数据类型
-- **int**: 整数
 - **bool**: true|false
+- **int**: 整数
 - **float**: 浮点数
 - **string**: 字符串
 - **array**: 数组
 - **dict**: 字典
+- **null**: null
 
 对于 array: 
 ```python
@@ -32,6 +33,7 @@ var slice = arr[1:4]  # [2, 3, 4]
 
 ### 操作符
 - 算术: `+`, `-`, `*`, `/`, `%`
+  * +: 支持字符串、数组拼接
 - 比较: `==`, `!=`, `<`, `<=`, `>`, `>=`
 - 逻辑: `&&`, `||`, `!`
 - 复合赋值: `+=`, `-=`, `*=`, `/=`
@@ -60,15 +62,12 @@ while (condition) {
 }
 
 # 遍历
-
 foreach (key => val in $dict) {
    .../break/continue/...
 }
-
 foreach (idx => list[idx] in $list) {
    .../break/continue/...
 }
-
 ```
 
 ### 函数
@@ -84,6 +83,53 @@ var result = factorial(10)
 print(result)  # 输出: 3628800
 ```
 
+### Class
+
+```python
+class Counter {
+  var count = 0
+  var _hidden = "secret"
+
+  func init(name, start) {
+    this.name = name
+    this.count = start
+  }
+  var name = ""
+
+  func inc() {
+    this.count = this.count + 1
+    return this.count
+  }
+
+  func _gen_label()
+  {
+    return this.name + ": " + str(this.count)
+  }
+  func label() {
+    return this._gen_label();
+  }
+
+  func copySecret(other) {
+    # 同一个类内可以访问私有成员
+    return other._hidden
+  }
+}
+
+var c = new Counter("c1", 1)
+println(c.label())
+println(c.inc())
+println(c.label())
+println(c.copySecret(c))
+```
+
+### include/include_once
+```
+include $code_file
+include_once $code_file
+```
+
+就像 c 的#include, 直接把代码片段插入, 仿佛原文件就是插入后的.
+
 ### 内置函数
 
 - `print(x, y, ..)` - 打印
@@ -95,6 +141,9 @@ print(result)  # 输出: 3628800
 - `type(x)` - 获取类型
 - `len(x)` - 获取长度
 - `append(arr, val)` - 添加到数组
+- `remove(dict_or_list, dict_key_or_list_idx)` - return true if dict_key_or_list_idx exists, or else return false
+
+- `math('ceil|floow|round|sin|cos|asin|acos|log|exp|pow|random', args..)`
 
 - `input()` - 读取用户输入
 - `read(filename)` - 读取文件
@@ -107,10 +156,12 @@ print(result)  # 输出: 3628800
 - `str_split(str, seperator)`
 - `str_join(str_list, seperator)`
 
+- `json_encode(list|dict|int|..)`
+- `json_decode(str) => list|dict|int|..)` - str: pseudo-json, 单双引号都行, list或dict最后一个元素后可以有逗号
+
 - `cmd_args()` - 获得命令行参数
 
 note: llvm 模式, 复杂函数是怎么编译成 binary 的? c 语言实现并编译成 bin, 然后 llvm 直接调用 c 实现
-
 
 ### 其他
 

@@ -12,6 +12,8 @@ typedef enum {
     VAL_DICT,
     VAL_FUNC,
     VAL_BUILTIN,
+    VAL_CLASS,
+    VAL_INSTANCE,
     VAL_NULL
 } ValueType;
 
@@ -20,6 +22,8 @@ typedef struct Environment Environment;
 typedef struct Function Function;
 typedef struct Array Array;
 typedef struct Dict Dict;
+typedef struct ClassValue ClassValue;
+typedef struct ClassInstance ClassInstance;
 
 typedef Value *(*BuiltinFunc)(Value **args, int arg_count);
 
@@ -34,6 +38,8 @@ struct Value {
         Dict *dict_val;
         Function *func_val;
         BuiltinFunc builtin_val;
+        ClassValue *class_val;
+        ClassInstance *instance_val;
     } data;
 };
 
@@ -59,6 +65,18 @@ struct Function {
     ASTNodeList *params;
     ASTNodeList *body;
     Environment *env;
+};
+
+struct ClassValue {
+    char *name;
+    ASTNodeList *members;  // Var declarations
+    ASTNodeList *methods;  // Function definitions
+    Environment *env;      // Defining environment
+};
+
+struct ClassInstance {
+    ClassValue *class_val;
+    Dict *fields;
 };
 
 typedef struct EnvEntry {

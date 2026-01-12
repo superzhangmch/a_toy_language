@@ -21,7 +21,8 @@ class Parser:
     def error(self, msg: str):
         """ parse 出错时 """
         token = self.current_token()
-        raise Exception(f"Parse error at line {token.line}, column {token.column}: {msg}")
+        fname = getattr(token, "filename", "<input>")
+        raise Exception(f"Parse error at {fname}:{token.line},{token.column}: {msg}")
 
     def current_token(self) -> Token:
         if self.pos < len(self.tokens):
@@ -76,6 +77,16 @@ class Parser:
             return self.parse_while_statement()  # While loops don't have semicolons
         elif token.type == TokenType.FOREACH:
             return self.parse_foreach_statement()  # Foreach loops don't have semicolons
+        elif token.type == TokenType.CLASS:
+            return self.parse_class_def()
+        elif token.type == TokenType.TRY:
+            stmt = self.parse_try_catch()
+        elif token.type == TokenType.RAISE:
+            self.advance()
+            expr = self.parse_expression()
+            stmt = self.attach_meta(Raise(expr), token)
+        elif token.type == TokenType.ASSERT:
+            stmt = self.parse_assert()
         elif token.type == TokenType.BREAK:
             self.advance()
             stmt = Break()
@@ -127,6 +138,11 @@ class Parser:
         value = self.parse_expression()
         return VarDeclaration(name_token.value, value)
 
+    def attach_meta(self, node: ASTNode, token: Token) -> ASTNode:
+        setattr(node, "line", token.line)
+        setattr(node, "file", getattr(token, "filename", "<input>"))
+        return node
+
     def parse_function_def(self) -> FunctionDef:
         """
         函数调用
@@ -154,6 +170,66 @@ class Parser:
 
         self.expect(TokenType.RBRACE)                        # }
         return FunctionDef(name_token.value, params, body)
+
+    def parse_class_def(self) -> 'ClassDef':
+        """
+        class Name { var fields; func methods() {...} }
+        """
+        from ast_nodes_2 import ClassDef
+
+        self.expect(TokenType.CLASS)
+        name_token = self.expect(TokenType.IDENTIFIER)
+        self.expect(TokenType.LBRACE)
+
+        members = []
+        methods = []
+
+        while self.current_token().type != TokenType.RBRACE:
+            if self.current_token().type == TokenType.VAR:
+                member = self.parse_var_declaration()
+                members.append(member)
+                if self.current_token().type == TokenType.SEMICOLON:
+                    self.advance()
+            elif self.current_token().type == TokenType.FUNC:
+                methods.append(self.parse_function_def())
+            else:
+                self.error(f"Unexpected token in class body: {self.current_token().type}")
+
+        self.expect(TokenType.RBRACE)
+        return ClassDef(name_token.value, members, methods)
+
+    def parse_try_catch(self) -> ASTNode:
+        from ast_nodes_2 import TryCatch
+        try_tok = self.expect(TokenType.TRY)
+        self.expect(TokenType.LBRACE)
+        try_block = []
+        while self.current_token().type != TokenType.RBRACE:
+            stmt = self.parse_statement()
+            if stmt:
+                try_block.append(stmt)
+        self.expect(TokenType.RBRACE)
+        self.expect(TokenType.CATCH)
+        catch_var_tok = self.expect(TokenType.IDENTIFIER)
+        self.expect(TokenType.LBRACE)
+        catch_block = []
+        while self.current_token().type != TokenType.RBRACE:
+            stmt = self.parse_statement()
+            if stmt:
+                catch_block.append(stmt)
+        self.expect(TokenType.RBRACE)
+        return self.attach_meta(TryCatch(try_block, catch_var_tok.value, catch_block), try_tok)
+
+    def parse_assert(self) -> ASTNode:
+        from ast_nodes_2 import Assert
+        as_tok = self.expect(TokenType.ASSERT)
+        self.expect(TokenType.LPAREN)
+        expr = self.parse_expression()
+        msg = None
+        if self.current_token().type == TokenType.COMMA:
+            self.advance()
+            msg = self.parse_expression()
+        self.expect(TokenType.RPAREN)
+        return self.attach_meta(Assert(expr, msg), as_tok)
 
     def parse_return(self) -> Return:
         self.expect(TokenType.RETURN)
@@ -297,15 +373,18 @@ class Parser:
     def parse_comparison(self) -> ASTNode:
         left = self.parse_additive()
 
-        while self.current_token().type in [TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE]:
+        while self.current_token().type in [TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE, TokenType.IN]:
             op_token = self.advance()
-            op_map = {
-                TokenType.LT: '<',
-                TokenType.LE: '<=',
-                TokenType.GT: '>',
-                TokenType.GE: '>='
-            }
-            op = op_map[op_token.type]
+            if op_token.type == TokenType.IN:
+                op = 'in'
+            else:
+                op_map = {
+                    TokenType.LT: '<',
+                    TokenType.LE: '<=',
+                    TokenType.GT: '>',
+                    TokenType.GE: '>='
+                }
+                op = op_map[op_token.type]
             right = self.parse_additive()
             left = BinaryOp(left, op, right)
 
@@ -354,7 +433,11 @@ class Parser:
         expr = self.parse_primary()
 
         while True:
-            if self.current_token().type == TokenType.LBRACKET:
+            if self.current_token().type == TokenType.DOT:
+                self.advance()
+                member_token = self.expect(TokenType.IDENTIFIER)
+                expr = MemberAccess(expr, member_token.value)
+            elif self.current_token().type == TokenType.LBRACKET:
                 self.advance()
 
                 # Parse first expression (start index or regular index)
@@ -373,8 +456,6 @@ class Parser:
                     expr = IndexAccess(expr, first_expr)
             elif self.current_token().type == TokenType.LPAREN:
                 # Function call
-                if not isinstance(expr, Identifier):
-                    self.error("Only identifiers can be called as functions")
                 self.advance()
                 arguments = []
                 while self.current_token().type != TokenType.RPAREN:
@@ -382,7 +463,12 @@ class Parser:
                     if self.current_token().type == TokenType.COMMA:
                         self.advance()
                 self.expect(TokenType.RPAREN)
-                expr = FunctionCall(expr.name, arguments)
+                if isinstance(expr, Identifier):
+                    expr = FunctionCall(expr.name, arguments)
+                elif isinstance(expr, MemberAccess):
+                    expr = MethodCall(expr.object, expr.member, arguments)
+                else:
+                    self.error("Only identifiers or object members can be called as functions")
             else:
                 break
 
@@ -411,9 +497,25 @@ class Parser:
             self.advance()
             return BoolLiteral(False)
 
+        elif token.type == TokenType.NULL:
+            self.advance()
+            return NullLiteral()
+
         elif token.type == TokenType.IDENTIFIER:
             self.advance()
             return Identifier(token.value)
+
+        elif token.type == TokenType.NEW:
+            self.advance()
+            class_token = self.expect(TokenType.IDENTIFIER)
+            self.expect(TokenType.LPAREN)
+            arguments = []
+            while self.current_token().type != TokenType.RPAREN:
+                arguments.append(self.parse_expression())
+                if self.current_token().type == TokenType.COMMA:
+                    self.advance()
+            self.expect(TokenType.RPAREN)
+            return NewExpression(class_token.value, arguments)
 
         elif token.type == TokenType.LBRACKET:
             return self.parse_array_literal()

@@ -4,10 +4,16 @@
 #include <unistd.h>
 #include "ast.h"
 #include "codegen_llvm.h"
+#include "core/preprocess.h"
 
 extern int yyparse();
 extern FILE *yyin;
 extern ASTNode *root;
+extern PreprocessResult g_pp_result;
+extern int yylineno;
+typedef void* YY_BUFFER_STATE;
+extern YY_BUFFER_STATE yy_scan_string(const char *yy_str);
+extern void yy_delete_buffer(YY_BUFFER_STATE b);
 
 static void compile_to_llvm_ir(const char *output_file) {
     FILE *out = fopen(output_file, "w");
@@ -53,20 +59,22 @@ int main(int argc, char **argv) {
     }
 
     // Open input file
-    yyin = fopen(input_file, "r");
-    if (!yyin) {
-        fprintf(stderr, "Error: Cannot open file %s\n", input_file);
+    PreprocessResult res;
+    if (preprocess_file(input_file, &res) != 0) {
         return 1;
     }
+    g_pp_result = res;
 
-    // Parse
     printf("Parsing %s...\n", input_file);
+    yylineno = 1;
+    YY_BUFFER_STATE buf = yy_scan_string(res.combined_source);
     if (yyparse() != 0 || root == NULL) {
         fprintf(stderr, "Parse error\n");
-        fclose(yyin);
+        yy_delete_buffer(buf);
+        free_preprocess_result(&res);
         return 1;
     }
-    fclose(yyin);
+    yy_delete_buffer(buf);
 
     // Generate LLVM IR
     char ll_file[256];
@@ -78,6 +86,7 @@ int main(int argc, char **argv) {
 
     printf("Generating LLVM IR: %s...\n", ll_file);
     compile_to_llvm_ir(ll_file);
+    free_preprocess_result(&res);
 
     if (emit_llvm_only) {
         printf("LLVM IR saved to: %s\n", ll_file);

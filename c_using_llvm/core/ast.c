@@ -2,10 +2,23 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ast.h"
+#include "tiny.tab.h"
+#include "preprocess.h"
+
+extern int yylineno;
+extern PreprocessResult g_pp_result;
 
 ASTNode *create_node(NodeType type) {
     ASTNode *node = (ASTNode *)malloc(sizeof(ASTNode));
     node->type = type;
+    node->line = yylineno;
+    const char *fname = "<input>";
+    int mapped_line = yylineno;
+    if (g_pp_result.mappings != NULL) {
+        map_line(&g_pp_result, yylineno, &fname, &mapped_line);
+    }
+    node->line = mapped_line;
+    node->file = strdup(fname);
     return node;
 }
 
@@ -36,6 +49,32 @@ ASTNode *create_string_literal(char *value) {
 ASTNode *create_bool_literal(int value) {
     ASTNode *node = create_node(NODE_BOOL_LITERAL);
     node->data.bool_literal.value = value;
+    return node;
+}
+
+ASTNode *create_null_literal() {
+    ASTNode *node = create_node(NODE_NULL_LITERAL);
+    return node;
+}
+
+ASTNode *create_try_catch(ASTNodeList *try_block, char *catch_var, ASTNodeList *catch_block) {
+    ASTNode *node = create_node(NODE_TRY_CATCH);
+    node->data.try_catch.try_block = try_block;
+    node->data.try_catch.catch_var = strdup(catch_var);
+    node->data.try_catch.catch_block = catch_block;
+    return node;
+}
+
+ASTNode *create_raise(ASTNode *expr) {
+    ASTNode *node = create_node(NODE_RAISE);
+    node->data.raise_stmt.expr = expr;
+    return node;
+}
+
+ASTNode *create_assert(ASTNode *expr, ASTNode *msg) {
+    ASTNode *node = create_node(NODE_ASSERT);
+    node->data.assert_stmt.expr = expr;
+    node->data.assert_stmt.msg = msg;
     return node;
 }
 
@@ -94,6 +133,12 @@ ASTNode *clone_ast_node(ASTNode *node) {
                 clone_ast_node(node->data.slice_access.object),
                 clone_ast_node(node->data.slice_access.start),
                 clone_ast_node(node->data.slice_access.end)
+            );
+
+        case NODE_MEMBER_ACCESS:
+            return create_member_access(
+                clone_ast_node(node->data.member_access.object),
+                node->data.member_access.member
             );
 
         case NODE_INT_LITERAL:
@@ -192,6 +237,36 @@ ASTNode *create_slice_access(ASTNode *object, ASTNode *start, ASTNode *end) {
     node->data.slice_access.object = object;
     node->data.slice_access.start = start;
     node->data.slice_access.end = end;
+    return node;
+}
+
+ASTNode *create_class_def(char *name, ASTNodeList *members, ASTNodeList *methods) {
+    ASTNode *node = create_node(NODE_CLASS_DEF);
+    node->data.class_def.name = strdup(name);
+    node->data.class_def.members = members;
+    node->data.class_def.methods = methods;
+    return node;
+}
+
+ASTNode *create_member_access(ASTNode *object, char *member) {
+    ASTNode *node = create_node(NODE_MEMBER_ACCESS);
+    node->data.member_access.object = object;
+    node->data.member_access.member = strdup(member);
+    return node;
+}
+
+ASTNode *create_method_call(ASTNode *object, char *method, ASTNodeList *arguments) {
+    ASTNode *node = create_node(NODE_METHOD_CALL);
+    node->data.method_call.object = object;
+    node->data.method_call.method = strdup(method);
+    node->data.method_call.arguments = arguments;
+    return node;
+}
+
+ASTNode *create_new_expression(char *class_name, ASTNodeList *arguments) {
+    ASTNode *node = create_node(NODE_NEW_EXPR);
+    node->data.new_expr.class_name = strdup(class_name);
+    node->data.new_expr.arguments = arguments;
     return node;
 }
 

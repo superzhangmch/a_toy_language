@@ -3,6 +3,8 @@
 #include <string.h>
 #include <setjmp.h>
 #include <regex.h>
+#include <ctype.h>
+#include <math.h>
 #include "interpreter.h"
 #include "ast.h"
 
@@ -12,9 +14,16 @@ static jmp_buf break_jmp;
 static jmp_buf continue_jmp;
 static int has_returned;
 static Value *return_value;
+static jmp_buf exception_stack[256];
+static int exception_top = 0;
+static Value *exception_value = NULL;
 
 static Environment *global_env;
 static Environment *current_env;
+static Environment *loop_env_stack[256];
+static int loop_env_top = 0;
+static ClassInstance *this_stack[256];
+static int this_stack_top = 0;
 
 // Global storage for command line arguments
 static int g_argc = 0;
@@ -24,6 +33,9 @@ static char **g_argv = NULL;
 static Value *eval_expression(ASTNode *node);
 static void eval_statement(ASTNode *node);
 static void setup_builtins();
+static Value *instantiate_class(ClassValue *cls, Value **args, int arg_count);
+static Value *call_method(Value *instance_val, const char *name, Value **args, int arg_count);
+static void execute_block(ASTNodeList *stmts);
 
 /* Hash function */
 static unsigned int hash(const char *str) {
@@ -97,6 +109,26 @@ Value *create_builtin_value(BuiltinFunc func) {
     Value *v = malloc(sizeof(Value));
     v->type = VAL_BUILTIN;
     v->data.builtin_val = func;
+    return v;
+}
+
+Value *create_class_value(char *name, ASTNodeList *members, ASTNodeList *methods, Environment *env) {
+    Value *v = malloc(sizeof(Value));
+    v->type = VAL_CLASS;
+    v->data.class_val = malloc(sizeof(ClassValue));
+    v->data.class_val->name = strdup(name);
+    v->data.class_val->members = members;
+    v->data.class_val->methods = methods;
+    v->data.class_val->env = env;
+    return v;
+}
+
+Value *create_instance_value(ClassValue *class_val) {
+    Value *v = malloc(sizeof(Value));
+    v->type = VAL_INSTANCE;
+    v->data.instance_val = malloc(sizeof(ClassInstance));
+    v->data.instance_val->class_val = class_val;
+    v->data.instance_val->fields = create_dict_value()->data.dict_val;
     return v;
 }
 
@@ -183,6 +215,29 @@ char **dict_keys(Dict *dict, int *count) {
     return keys;
 }
 
+static int dict_delete(Dict *dict, const char *key) {
+    unsigned int idx = hash(key);
+    DictEntry *entry = dict->buckets[idx];
+    DictEntry *prev = NULL;
+
+    while (entry != NULL) {
+        if (strcmp(entry->key, key) == 0) {
+            if (prev == NULL) {
+                dict->buckets[idx] = entry->next;
+            } else {
+                prev->next = entry->next;
+            }
+            free(entry->key);
+            free(entry);
+            dict->size--;
+            return 1;
+        }
+        prev = entry;
+        entry = entry->next;
+    }
+    return 0;
+}
+
 /* Environment functions */
 Environment *create_environment(Environment *parent) {
     Environment *env = malloc(sizeof(Environment));
@@ -242,6 +297,88 @@ void env_set(Environment *env, char *name, Value *val) {
     exit(1);
 }
 
+/* Class helpers */
+static void push_this(ClassInstance *instance) {
+    if (this_stack_top >= 256) {
+        fprintf(stderr, "this stack overflow\n");
+        exit(1);
+    }
+    this_stack[this_stack_top++] = instance;
+}
+
+static void pop_this() {
+    if (this_stack_top > 0) this_stack_top--;
+}
+
+static int is_internal_access(ClassInstance *instance) {
+    return this_stack_top > 0 && this_stack[this_stack_top - 1]->class_val == instance->class_val;
+}
+
+static Function* find_method(ClassValue *cls, const char *name) {
+    ASTNodeList *m = cls->methods;
+    while (m != NULL) {
+        if (strcmp(m->node->data.func_def.name, name) == 0) {
+            // Reuse the AST node directly
+            Function *f = malloc(sizeof(Function));
+            f->name = m->node->data.func_def.name;
+            f->params = m->node->data.func_def.params;
+            f->body = m->node->data.func_def.body;
+            f->env = cls->env;
+            return f;
+        }
+        m = m->next;
+    }
+    return NULL;
+}
+
+static Value *get_member(ClassInstance *instance, const char *name) {
+    if (instance == NULL) {
+        fprintf(stderr, "Member access on null instance\n");
+        exit(1);
+    }
+
+    int is_private = name[0] == '_';
+    if (is_private && !is_internal_access(instance)) {
+        fprintf(stderr, "Cannot access private member '%s' of class %s\n", name, instance->class_val->name);
+        exit(1);
+    }
+
+    Dict *fields = instance->fields;
+    unsigned int idx = hash(name);
+    DictEntry *entry = fields->buckets[idx];
+    while (entry != NULL) {
+        if (strcmp(entry->key, name) == 0) {
+            return entry->value;
+        }
+        entry = entry->next;
+    }
+
+    Function *m = find_method(instance->class_val, name);
+    if (m != NULL) {
+        Value *v = malloc(sizeof(Value));
+        v->type = VAL_FUNC;
+        v->data.func_val = m;
+        return v;
+    }
+
+    fprintf(stderr, "Member '%s' not found on class %s\n", name, instance->class_val->name);
+    exit(1);
+}
+
+static void set_member(ClassInstance *instance, const char *name, Value *val) {
+    if (instance == NULL) {
+        fprintf(stderr, "Member assignment on null instance\n");
+        exit(1);
+    }
+
+    int is_private = name[0] == '_';
+    if (is_private && !is_internal_access(instance)) {
+        fprintf(stderr, "Cannot access private member '%s' of class %s\n", name, instance->class_val->name);
+        exit(1);
+    }
+
+    dict_set(instance->fields, (char*)name, val);
+}
 /* Built-in functions */
 static void print_value_recursive(Value *v) {
     switch (v->type) {
@@ -255,10 +392,10 @@ static void print_value_recursive(Value *v) {
             printf("\"%s\"", v->data.string_val);
             break;
         case VAL_BOOL:
-            printf("%s", v->data.bool_val ? "True" : "False");
+            printf("%s", v->data.bool_val ? "true" : "false");
             break;
         case VAL_NULL:
-            printf("None");
+            printf("null");
             break;
         case VAL_ARRAY: {
             printf("[");
@@ -287,9 +424,50 @@ static void print_value_recursive(Value *v) {
             printf("}");
             break;
         }
+        case VAL_CLASS:
+            printf("<class %s>", v->data.class_val->name);
+            break;
+        case VAL_INSTANCE:
+            printf("<instance %s>", v->data.instance_val->class_val->name);
+            break;
         default:
             printf("<object>");
     }
+}
+
+/* Exception helpers */
+static char *value_to_string(Value *v) {
+    char buf[256];
+    switch (v->type) {
+        case VAL_STRING:
+            return strdup(v->data.string_val);
+        case VAL_INT:
+            snprintf(buf, sizeof(buf), "%d", v->data.int_val);
+            return strdup(buf);
+        case VAL_FLOAT:
+            snprintf(buf, sizeof(buf), "%g", v->data.float_val);
+            return strdup(buf);
+        case VAL_BOOL:
+            return strdup(v->data.bool_val ? "true" : "false");
+        case VAL_NULL:
+            return strdup("null");
+        default:
+            return strdup("<object>");
+    }
+}
+
+static void raise_exception(Value *msg, const char *file, int line) {
+    char *mstr = value_to_string(msg);
+    char full[512];
+    snprintf(full, sizeof(full), "%s:%d: %s", file ? file : "<input>", line, mstr);
+    free(mstr);
+    exception_value = create_string_value(full);
+
+    if (exception_top > 0) {
+        longjmp(exception_stack[exception_top - 1], 1);
+    }
+    fprintf(stderr, "%s\n", full);
+    exit(1);
 }
 
 static Value *builtin_print(Value **args, int arg_count) {
@@ -309,10 +487,10 @@ static Value *builtin_print(Value **args, int arg_count) {
                     printf("%g", v->data.float_val);
                     break;
                 case VAL_BOOL:
-                    printf("%s", v->data.bool_val ? "True" : "False");
+                    printf("%s", v->data.bool_val ? "true" : "false");
                     break;
                 case VAL_NULL:
-                    printf("None");
+                    printf("null");
                     break;
                 default:
                     printf("<object>");
@@ -388,7 +566,7 @@ static Value *builtin_str(Value **args, int arg_count) {
         return create_string_value(buf);
     }
     if (v->type == VAL_BOOL) {
-        return create_string_value(v->data.bool_val ? "True" : "False");
+        return create_string_value(v->data.bool_val ? "true" : "false");
     }
     return create_string_value("");
 }
@@ -420,6 +598,9 @@ static Value *builtin_type(Value **args, int arg_count) {
         case VAL_ARRAY: return create_string_value("array");
         case VAL_DICT: return create_string_value("dict");
         case VAL_FUNC: return create_string_value("function");
+        case VAL_CLASS: return create_string_value("class");
+        case VAL_INSTANCE: return create_string_value("instance");
+        case VAL_NULL: return create_string_value("null");
         default: return create_string_value("unknown");
     }
 }
@@ -454,6 +635,349 @@ static Value *builtin_values(Value **args, int arg_count) {
         }
     }
     return arr;
+}
+
+static Value *builtin_remove(Value **args, int arg_count) {
+    if (arg_count != 2) {
+        fprintf(stderr, "remove() requires 2 arguments\n");
+        exit(1);
+    }
+    Value *target = args[0];
+    Value *key = args[1];
+
+    if (target->type == VAL_ARRAY) {
+        if (key->type != VAL_INT) return create_bool_value(0);
+        int idx = key->data.int_val;
+        Array *arr = target->data.array_val;
+        if (idx < 0 || idx >= arr->size) return create_bool_value(0);
+        for (int i = idx; i < arr->size - 1; i++) {
+            arr->elements[i] = arr->elements[i + 1];
+        }
+        arr->size--;
+        return create_bool_value(1);
+    }
+
+    if (target->type == VAL_DICT) {
+        if (key->type != VAL_STRING) return create_bool_value(0);
+        int removed = dict_delete(target->data.dict_val, key->data.string_val);
+        return create_bool_value(removed);
+    }
+
+    return create_bool_value(0);
+}
+
+static double value_to_double(Value *v) {
+    switch (v->type) {
+        case VAL_INT: return (double)v->data.int_val;
+        case VAL_FLOAT: return v->data.float_val;
+        case VAL_BOOL: return v->data.bool_val ? 1.0 : 0.0;
+        case VAL_STRING: return atof(v->data.string_val);
+        default: return 0.0;
+    }
+}
+
+static Value *builtin_math(Value **args, int arg_count) {
+    if (arg_count < 1 || args[0]->type != VAL_STRING) {
+        fprintf(stderr, "math() first argument must be operation string\n");
+        exit(1);
+    }
+    const char *name = args[0]->data.string_val;
+
+    if (strcmp(name, "sin") == 0 || strcmp(name, "cos") == 0 ||
+        strcmp(name, "asin") == 0 || strcmp(name, "acos") == 0 ||
+        strcmp(name, "log") == 0 || strcmp(name, "exp") == 0 ||
+        strcmp(name, "ceil") == 0 || strcmp(name, "floor") == 0 ||
+        strcmp(name, "round") == 0) {
+        if (arg_count != 2) {
+            fprintf(stderr, "math(%s) requires 1 argument\n", name);
+            exit(1);
+        }
+        double val = value_to_double(args[1]);
+        double res;
+        if (strcmp(name, "sin") == 0) res = sin(val);
+        else if (strcmp(name, "cos") == 0) res = cos(val);
+        else if (strcmp(name, "asin") == 0) res = asin(val);
+        else if (strcmp(name, "acos") == 0) res = acos(val);
+        else if (strcmp(name, "log") == 0) res = log(val);
+        else if (strcmp(name, "exp") == 0) res = exp(val);
+        else if (strcmp(name, "ceil") == 0) res = ceil(val);
+        else if (strcmp(name, "floor") == 0) res = floor(val);
+        else res = round(val);
+        return create_float_value(res);
+    }
+
+    if (strcmp(name, "pow") == 0) {
+        if (arg_count != 3) {
+            fprintf(stderr, "math(pow) requires 2 arguments\n");
+            exit(1);
+        }
+        double a = value_to_double(args[1]);
+        double b = value_to_double(args[2]);
+        return create_float_value(pow(a, b));
+    }
+
+    if (strcmp(name, "random") == 0) {
+        if (arg_count == 1) {
+            double r = (double)rand() / (double)RAND_MAX;
+            return create_float_value(r);
+        }
+        if (arg_count == 3) {
+            double a = value_to_double(args[1]);
+            double b = value_to_double(args[2]);
+            double r = (double)rand() / (double)RAND_MAX;
+            return create_float_value(a + (b - a) * r);
+        }
+        fprintf(stderr, "math(random) requires 0 or 2 arguments\n");
+        exit(1);
+    }
+
+    fprintf(stderr, "math(): unsupported op %s\n", name);
+    exit(1);
+}
+
+/* JSON helpers */
+static int json_error = 0;
+
+static const char* skip_ws(const char *p) {
+    while (*p && isspace((unsigned char)*p)) p++;
+    return p;
+}
+
+static Value *parse_json_value(const char **p);
+
+static Value *parse_json_string(const char **p) {
+    if (**p != '"' && **p != '\'') { json_error = 1; return create_null_value(); }
+    const char quote = **p;
+    (*p)++; // skip quote
+    char buffer[4096];
+    int idx = 0;
+    while (**p && **p != quote) {
+        if (**p == '\\') {
+            (*p)++;
+            char esc = **p;
+            switch (esc) {
+                case '"': buffer[idx++] = '"'; break;
+                case '\'': buffer[idx++] = '\''; break;
+                case '\\': buffer[idx++] = '\\'; break;
+                case 'n': buffer[idx++] = '\n'; break;
+                case 't': buffer[idx++] = '\t'; break;
+                case 'r': buffer[idx++] = '\r'; break;
+                default: buffer[idx++] = esc; break;
+            }
+        } else {
+            buffer[idx++] = **p;
+        }
+        (*p)++;
+        if (idx >= 4095) break;
+    }
+    buffer[idx] = '\0';
+    if (**p == quote) (*p)++; // consume closing
+    return create_string_value(buffer);
+}
+
+static Value *parse_json_number(const char **p) {
+    char *endptr;
+    double d = strtod(*p, &endptr);
+    int is_float = 0;
+    for (const char *q = *p; q < endptr; q++) {
+        if (*q == '.' || *q == 'e' || *q == 'E') { is_float = 1; break; }
+    }
+    *p = endptr;
+    if (is_float) return create_float_value(d);
+    return create_int_value((int)d);
+}
+
+static int match_word(const char **p, const char *word) {
+    const char *s = *p;
+    while (*word) {
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*word)) return 0;
+        s++; word++;
+    }
+    *p = s;
+    return 1;
+}
+
+static Value *parse_json_array(const char **p) {
+    if (**p != '[') { json_error = 1; return create_null_value(); }
+    (*p)++; // skip '['
+    Value *arr = create_array_value();
+    *p = skip_ws(*p);
+    if (**p == ']') { (*p)++; return arr; }
+    int closed = 0;
+    while (**p) {
+        Value *val = parse_json_value(p);
+        array_append(arr->data.array_val, val);
+        *p = skip_ws(*p);
+        if (**p == ',') {
+            (*p)++;
+            *p = skip_ws(*p);
+            if (**p == ']') { (*p)++; closed = 1; break; }
+            continue;
+        } else if (**p == ']') { (*p)++; closed = 1; break; }
+        else { json_error = 1; break; }
+    }
+    if (!closed) json_error = 1;
+    return arr;
+}
+
+static Value *parse_json_object(const char **p) {
+    if (**p != '{') { json_error = 1; return create_null_value(); }
+    (*p)++; // skip '{'
+    Value *dict = create_dict_value();
+    *p = skip_ws(*p);
+    if (**p == '}') { (*p)++; return dict; }
+    int closed = 0;
+    while (**p) {
+        *p = skip_ws(*p);
+        if (**p != '"' && **p != '\'') { json_error = 1; break; }
+        Value *key = parse_json_string(p);
+        *p = skip_ws(*p);
+        if (**p == ':') (*p)++;
+        else { json_error = 1; break; }
+        *p = skip_ws(*p);
+        Value *val = parse_json_value(p);
+        dict_set(dict->data.dict_val, key->data.string_val, val);
+        *p = skip_ws(*p);
+        if (**p == ',') {
+            (*p)++;
+            *p = skip_ws(*p);
+            if (**p == '}') { (*p)++; closed = 1; break; }
+            continue;
+        } else if (**p == '}') { (*p)++; closed = 1; break; }
+        else { json_error = 1; break; }
+    }
+    if (!closed) json_error = 1;
+    return dict;
+}
+
+static Value *parse_json_value(const char **p) {
+    *p = skip_ws(*p);
+    char c = **p;
+    if (c == '"' || c == '\'') return parse_json_string(p);
+    if (c == '[') return parse_json_array(p);
+    if (c == '{') return parse_json_object(p);
+    if (isdigit((unsigned char)c) || c == '-' ) return parse_json_number(p);
+    if (match_word(p, "true")) return create_bool_value(1);
+    if (match_word(p, "false")) return create_bool_value(0);
+    if (match_word(p, "null")) return create_null_value();
+    json_error = 1;
+    return create_null_value();
+}
+
+static void sb_append(char **buf, int *len, int *cap, const char *s) {
+    int slen = strlen(s);
+    if (*len + slen + 1 > *cap) {
+        *cap = (*cap + slen + 256);
+        *buf = realloc(*buf, *cap);
+    }
+    memcpy(*buf + *len, s, slen);
+    *len += slen;
+    (*buf)[*len] = '\0';
+}
+
+static void json_serialize_value(Value *v, char **buf, int *len, int *cap);
+
+static void json_serialize_string(const char *s, char **buf, int *len, int *cap) {
+    sb_append(buf, len, cap, "\"");
+    while (*s) {
+        if (*s == '"' || *s == '\\') {
+            char esc[3] = {'\\', *s, '\0'};
+            sb_append(buf, len, cap, esc);
+        } else if (*s == '\n') {
+            sb_append(buf, len, cap, "\\n");
+        } else if (*s == '\t') {
+            sb_append(buf, len, cap, "\\t");
+        } else {
+            char ch[2] = {*s, '\0'};
+            sb_append(buf, len, cap, ch);
+        }
+        s++;
+    }
+    sb_append(buf, len, cap, "\"");
+}
+
+static void json_serialize_value(Value *v, char **buf, int *len, int *cap) {
+    switch (v->type) {
+        case VAL_INT: {
+            char tmp[64]; sprintf(tmp, "%d", v->data.int_val);
+            sb_append(buf, len, cap, tmp);
+            break;
+        }
+        case VAL_FLOAT: {
+            char tmp[64]; sprintf(tmp, "%g", v->data.float_val);
+            sb_append(buf, len, cap, tmp);
+            break;
+        }
+        case VAL_BOOL:
+            sb_append(buf, len, cap, v->data.bool_val ? "true" : "false");
+            break;
+        case VAL_NULL:
+            sb_append(buf, len, cap, "null");
+            break;
+        case VAL_STRING:
+            json_serialize_string(v->data.string_val, buf, len, cap);
+            break;
+        case VAL_ARRAY: {
+            sb_append(buf, len, cap, "[");
+            Array *arr = v->data.array_val;
+            for (int i = 0; i < arr->size; i++) {
+                json_serialize_value(arr->elements[i], buf, len, cap);
+                if (i < arr->size - 1) sb_append(buf, len, cap, ",");
+            }
+            sb_append(buf, len, cap, "]");
+            break;
+        }
+        case VAL_DICT: {
+            sb_append(buf, len, cap, "{");
+            int first = 1;
+            for (int i = 0; i < HASH_SIZE; i++) {
+                DictEntry *entry = v->data.dict_val->buckets[i];
+                while (entry) {
+                    if (!first) sb_append(buf, len, cap, ",");
+                    first = 0;
+                    json_serialize_string(entry->key, buf, len, cap);
+                    sb_append(buf, len, cap, ":");
+                    json_serialize_value(entry->value, buf, len, cap);
+                    entry = entry->next;
+                }
+            }
+            sb_append(buf, len, cap, "}");
+            break;
+        }
+        default:
+            sb_append(buf, len, cap, "null");
+    }
+}
+
+static Value *builtin_json_decode(Value **args, int arg_count) {
+    if (arg_count != 1 || args[0]->type != VAL_STRING) {
+        fprintf(stderr, "json_decode expects 1 string argument\n");
+        exit(1);
+    }
+    json_error = 0;
+    const char *p = args[0]->data.string_val;
+    Value *v = parse_json_value(&p);
+    p = skip_ws(p);
+    if (*p != '\0') json_error = 1;
+    if (json_error) {
+        Value *msg = create_string_value("Invalid JSON string");
+        raise_exception(msg, "<builtin>", 0);
+        return create_null_value();
+    }
+    return v;
+}
+
+static Value *builtin_json_encode(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "json_encode expects 1 argument\n");
+        exit(1);
+    }
+    char *buf = malloc(256);
+    buf[0] = '\0';
+    int len = 0, cap = 256;
+    json_serialize_value(args[0], &buf, &len, &cap);
+    Value *res = create_string_value(buf);
+    return res;
 }
 
 static Value *builtin_input(Value **args, int arg_count) {
@@ -523,7 +1047,7 @@ static Value *builtin_write(Value **args, int arg_count) {
     } else if (content->type == VAL_FLOAT) {
         fprintf(fp, "%g", content->data.float_val);
     } else {
-        fprintf(fp, "%s", content->data.bool_val ? "True" : "False");
+        fprintf(fp, "%s", content->data.bool_val ? "true" : "false");
     }
 
     fclose(fp);
@@ -820,6 +1344,128 @@ static void setup_builtins() {
     env_define(global_env, "str_split", create_builtin_value(builtin_str_split));
     env_define(global_env, "str_join", create_builtin_value(builtin_str_join));
     env_define(global_env, "cmd_args", create_builtin_value(builtin_cmd_args));
+    env_define(global_env, "remove", create_builtin_value(builtin_remove));
+    env_define(global_env, "math", create_builtin_value(builtin_math));
+    env_define(global_env, "json_encode", create_builtin_value(builtin_json_encode));
+    env_define(global_env, "json_decode", create_builtin_value(builtin_json_decode));
+}
+
+static Value *instantiate_class(ClassValue *cls, Value **args, int arg_count) {
+    Value *instance_val = create_instance_value(cls);
+    ClassInstance *instance = instance_val->data.instance_val;
+
+    // Initialize member variables
+    Environment *prev_env = current_env;
+    Environment *init_env = create_environment(cls->env);
+    env_define(init_env, "this", instance_val);
+    env_define(init_env, "self", instance_val);
+    current_env = init_env;
+    push_this(instance);
+    ASTNodeList *m = cls->members;
+    while (m != NULL) {
+        Value *val = eval_expression(m->node->data.var_decl.value);
+        dict_set(instance->fields, m->node->data.var_decl.name, val);
+        m = m->next;
+    }
+    pop_this();
+    current_env = prev_env;
+
+    // Call constructor init if present
+    Function *init_func = find_method(cls, "init");
+    if (init_func != NULL) {
+        // Count params
+        int param_count = 0;
+        ASTNodeList *p = init_func->params;
+        while (p != NULL) {
+            param_count++;
+            p = p->next;
+        }
+        if (param_count != arg_count) {
+            fprintf(stderr, "Constructor for %s expects %d arguments, got %d\n", cls->name, param_count, arg_count);
+            exit(1);
+        }
+        call_method(instance_val, "init", args, arg_count);
+    } else if (arg_count > 0) {
+        fprintf(stderr, "Class %s constructor does not take arguments\n", cls->name);
+        exit(1);
+    }
+
+    return instance_val;
+}
+
+static Value *call_method(Value *instance_val, const char *name, Value **args, int arg_count) {
+    if (instance_val->type != VAL_INSTANCE) {
+        fprintf(stderr, "Method call only valid on class instances\n");
+        exit(1);
+    }
+    ClassInstance *instance = instance_val->data.instance_val;
+    int is_private = name[0] == '_';
+    if (is_private && !is_internal_access(instance)) {
+        fprintf(stderr, "Cannot access private method '%s' of class %s\n", name, instance->class_val->name);
+        exit(1);
+    }
+
+    Function *method = find_method(instance->class_val, name);
+    if (method == NULL) {
+        fprintf(stderr, "Method '%s' not found on class %s\n", name, instance->class_val->name);
+        exit(1);
+    }
+
+    // Count params
+    int param_count = 0;
+    ASTNodeList *p = method->params;
+    while (p != NULL) {
+        param_count++;
+        p = p->next;
+    }
+    if (param_count != arg_count) {
+        fprintf(stderr, "Method %s expects %d arguments, got %d\n", name, param_count, arg_count);
+        exit(1);
+    }
+
+    Environment *func_env = create_environment(method->env);
+    env_define(func_env, "this", instance_val);
+    env_define(func_env, "self", instance_val);
+
+    // Bind parameters
+    ASTNodeList *param = method->params;
+    for (int i = 0; i < arg_count; i++) {
+        env_define(func_env, param->node->data.identifier.name, args[i]);
+        param = param->next;
+    }
+
+    Environment *prev_env = current_env;
+    current_env = func_env;
+    push_this(instance);
+
+    has_returned = 0;
+    ASTNodeList *stmt = method->body;
+    while (stmt != NULL && !has_returned) {
+        eval_statement(stmt->node);
+        stmt = stmt->next;
+    }
+
+    pop_this();
+    current_env = prev_env;
+
+    if (has_returned) {
+        Value *result = return_value;
+        has_returned = 0;
+        return result;
+    }
+    return create_null_value();
+}
+
+static void execute_block(ASTNodeList *stmts) {
+    Environment *prev_env = current_env;
+    Environment *block_env = create_environment(prev_env);
+    current_env = block_env;
+    ASTNodeList *stmt = stmts;
+    while (stmt != NULL && !has_returned) {
+        eval_statement(stmt->node);
+        stmt = stmt->next;
+    }
+    current_env = prev_env;
 }
 
 /* Evaluation functions */
@@ -837,6 +1483,19 @@ static int is_truthy(Value *v) {
 static Value *eval_binary_op(Value *left, Operator op, Value *right) {
     switch (op) {
         case OP_ADD:
+            if (left->type == VAL_ARRAY && right->type == VAL_ARRAY) {
+                Value *arr = create_array_value();
+                Array *res = arr->data.array_val;
+                Array *la = left->data.array_val;
+                Array *ra = right->data.array_val;
+                for (int i = 0; i < la->size; i++) {
+                    array_append(res, la->elements[i]);
+                }
+                for (int i = 0; i < ra->size; i++) {
+                    array_append(res, ra->elements[i]);
+                }
+                return arr;
+            }
             if (left->type == VAL_STRING || right->type == VAL_STRING) {
                 char buf[1024];
                 char left_str[512], right_str[512];
@@ -889,6 +1548,7 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             if (left->type == VAL_FLOAT) return create_bool_value(left->data.float_val == right->data.float_val);
             if (left->type == VAL_STRING) return create_bool_value(strcmp(left->data.string_val, right->data.string_val) == 0);
             if (left->type == VAL_BOOL) return create_bool_value(left->data.bool_val == right->data.bool_val);
+            if (left->type == VAL_NULL) return create_bool_value(1);
             return create_bool_value(0);
 
         case OP_NE:
@@ -897,6 +1557,7 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             if (left->type == VAL_FLOAT) return create_bool_value(left->data.float_val != right->data.float_val);
             if (left->type == VAL_STRING) return create_bool_value(strcmp(left->data.string_val, right->data.string_val) != 0);
             if (left->type == VAL_BOOL) return create_bool_value(left->data.bool_val != right->data.bool_val);
+            if (left->type == VAL_NULL) return create_bool_value(0);
             return create_bool_value(1);
 
         case OP_LT:
@@ -1026,8 +1687,20 @@ static Value *eval_expression(ASTNode *node) {
         case NODE_BOOL_LITERAL:
             return create_bool_value(node->data.bool_literal.value);
 
+        case NODE_NULL_LITERAL:
+            return create_null_value();
+
         case NODE_IDENTIFIER:
             return env_get(current_env, node->data.identifier.name);
+
+        case NODE_MEMBER_ACCESS: {
+            Value *obj = eval_expression(node->data.member_access.object);
+            if (obj->type != VAL_INSTANCE) {
+                fprintf(stderr, "Member access only valid on class instances\n");
+                exit(1);
+            }
+            return get_member(obj->data.instance_val, node->data.member_access.member);
+        }
 
         case NODE_BINARY_OP: {
             Value *left = eval_expression(node->data.binary_op.left);
@@ -1193,6 +1866,54 @@ static Value *eval_expression(ASTNode *node) {
             exit(1);
         }
 
+        case NODE_METHOD_CALL: {
+            // Evaluate arguments
+            int arg_count = 0;
+            ASTNodeList *arg_node = node->data.method_call.arguments;
+            while (arg_node != NULL) {
+                arg_count++;
+                arg_node = arg_node->next;
+            }
+
+            Value **args = malloc(arg_count * sizeof(Value*));
+            arg_node = node->data.method_call.arguments;
+            for (int i = 0; i < arg_count; i++) {
+                args[i] = eval_expression(arg_node->node);
+                arg_node = arg_node->next;
+            }
+
+            Value *obj = eval_expression(node->data.method_call.object);
+            Value *result = call_method(obj, node->data.method_call.method, args, arg_count);
+            free(args);
+            return result;
+        }
+
+        case NODE_NEW_EXPR: {
+            Value *cls_val = env_get(current_env, node->data.new_expr.class_name);
+            if (cls_val->type != VAL_CLASS) {
+                fprintf(stderr, "%s is not a class\n", node->data.new_expr.class_name);
+                exit(1);
+            }
+
+            int arg_count = 0;
+            ASTNodeList *arg_node = node->data.new_expr.arguments;
+            while (arg_node != NULL) {
+                arg_count++;
+                arg_node = arg_node->next;
+            }
+
+            Value **args = malloc(arg_count * sizeof(Value*));
+            arg_node = node->data.new_expr.arguments;
+            for (int i = 0; i < arg_count; i++) {
+                args[i] = eval_expression(arg_node->node);
+                arg_node = arg_node->next;
+            }
+
+            Value *result = instantiate_class(cls_val->data.class_val, args, arg_count);
+            free(args);
+            return result;
+        }
+
         default:
             fprintf(stderr, "Unknown expression type\n");
             exit(1);
@@ -1222,6 +1943,13 @@ static void eval_statement(ASTNode *node) {
                 } else if (obj->type == VAL_DICT) {
                     dict_set(obj->data.dict_val, idx->data.string_val, val);
                 }
+            } else if (target->type == NODE_MEMBER_ACCESS) {
+                Value *obj = eval_expression(target->data.member_access.object);
+                if (obj->type != VAL_INSTANCE) {
+                    fprintf(stderr, "Member assignment only valid on class instances\n");
+                    exit(1);
+                }
+                set_member(obj->data.instance_val, target->data.member_access.member, val);
             }
             break;
         }
@@ -1237,6 +1965,17 @@ static void eval_statement(ASTNode *node) {
             break;
         }
 
+        case NODE_CLASS_DEF: {
+            Value *cls = create_class_value(
+                node->data.class_def.name,
+                node->data.class_def.members,
+                node->data.class_def.methods,
+                current_env
+            );
+            env_define(current_env, node->data.class_def.name, cls);
+            break;
+        }
+
         case NODE_RETURN: {
             return_value = node->data.return_stmt.value ?
                 eval_expression(node->data.return_stmt.value) :
@@ -1245,60 +1984,123 @@ static void eval_statement(ASTNode *node) {
             break;
         }
 
+        case NODE_TRY_CATCH: {
+            if (exception_top >= 256) {
+                fprintf(stderr, "Exception stack overflow\n");
+                exit(1);
+            }
+            int idx = exception_top++;
+            int jmp_res = setjmp(exception_stack[idx]);
+            if (jmp_res == 0) {
+                execute_block(node->data.try_catch.try_block);
+                exception_top = idx;
+            } else {
+                exception_top = idx;
+                Environment *prev_env = current_env;
+                Environment *catch_env = create_environment(prev_env);
+                // Prepend catch location
+                char buf[512];
+                const char *cfile = node->file ? node->file : "<input>";
+                snprintf(buf, sizeof(buf), "[caught in %s:%d] ", cfile, node->line);
+                if (exception_value && exception_value->type == VAL_STRING) {
+                    char *combined = malloc(strlen(buf) + strlen(exception_value->data.string_val) + 1);
+                    strcpy(combined, buf);
+                    strcat(combined, exception_value->data.string_val);
+                    env_define(catch_env, node->data.try_catch.catch_var, create_string_value(combined));
+                    free(combined);
+                } else {
+                    env_define(catch_env, node->data.try_catch.catch_var,
+                               exception_value ? exception_value : create_null_value());
+                }
+                current_env = catch_env;
+                exception_value = NULL;
+                ASTNodeList *stmt = node->data.try_catch.catch_block;
+                while (stmt != NULL && !has_returned) {
+                    eval_statement(stmt->node);
+                    stmt = stmt->next;
+                }
+                current_env = prev_env;
+            }
+            break;
+        }
+
+        case NODE_RAISE: {
+            Value *m = eval_expression(node->data.raise_stmt.expr);
+            raise_exception(m, node->file, node->line);
+            break;
+        }
+
+        case NODE_ASSERT: {
+            Value *cond = eval_expression(node->data.assert_stmt.expr);
+            if (!is_truthy(cond)) {
+                Value *msg = node->data.assert_stmt.msg ?
+                    eval_expression(node->data.assert_stmt.msg) :
+                    create_string_value("Assertion failed");
+                raise_exception(msg, node->file, node->line);
+            }
+            break;
+        }
+
         case NODE_IF_STMT: {
             Value *cond = eval_expression(node->data.if_stmt.condition);
             if (is_truthy(cond)) {
-                ASTNodeList *stmt = node->data.if_stmt.then_block;
-                while (stmt != NULL && !has_returned) {
-                    eval_statement(stmt->node);
-                    stmt = stmt->next;
-                }
+                execute_block(node->data.if_stmt.then_block);
             } else if (node->data.if_stmt.else_block) {
-                ASTNodeList *stmt = node->data.if_stmt.else_block;
-                while (stmt != NULL && !has_returned) {
-                    eval_statement(stmt->node);
-                    stmt = stmt->next;
-                }
+                execute_block(node->data.if_stmt.else_block);
             }
             break;
         }
 
         case NODE_WHILE_STMT: {
+            Environment *loop_base = current_env;
+            loop_env_stack[loop_env_top++] = loop_base;
             if (setjmp(break_jmp) == 0) {
                 while (1) {
                     if (has_returned) break;
 
+                    current_env = loop_base;
                     Value *cond = eval_expression(node->data.while_stmt.condition);
                     if (!is_truthy(cond)) break;
 
                     if (setjmp(continue_jmp) == 0) {
+                        Environment *iter_env = create_environment(loop_base);
+                        Environment *prev_env = current_env;
+                        current_env = iter_env;
                         ASTNodeList *stmt = node->data.while_stmt.body;
                         while (stmt != NULL && !has_returned) {
                             eval_statement(stmt->node);
                             stmt = stmt->next;
                         }
+                        current_env = prev_env;
                     }
                 }
             }
+            loop_env_top--;
+            current_env = loop_base;
             break;
         }
 
         case NODE_FOREACH_STMT: {
             Value *collection = eval_expression(node->data.foreach_stmt.collection);
+            Environment *loop_base = current_env;
+            loop_env_stack[loop_env_top++] = loop_base;
 
             if (setjmp(break_jmp) == 0) {
                 if (collection->type == VAL_ARRAY) {
                     Array *arr = collection->data.array_val;
                     for (int i = 0; i < arr->size && !has_returned; i++) {
-                        env_define(current_env, node->data.foreach_stmt.key_var, create_int_value(i));
-                        env_define(current_env, node->data.foreach_stmt.value_var, arr->elements[i]);
-
                         if (setjmp(continue_jmp) == 0) {
+                            Environment *iter_env = create_environment(loop_base);
+                            Environment *prev_env = current_env;
+                            current_env = iter_env;
+                            env_define(current_env, node->data.foreach_stmt.key_var, create_int_value(i));
+                            env_define(current_env, node->data.foreach_stmt.value_var, arr->elements[i]);
                             ASTNodeList *stmt = node->data.foreach_stmt.body;
                             while (stmt != NULL && !has_returned) {
                                 eval_statement(stmt->node);
                                 stmt = stmt->next;
                             }
+                            current_env = prev_env;
                         }
                     }
                 } else if (collection->type == VAL_DICT) {
@@ -1307,15 +2109,18 @@ static void eval_statement(ASTNode *node) {
                     char **keys = dict_keys(dict, &count);
 
                     for (int i = 0; i < count && !has_returned; i++) {
-                        env_define(current_env, node->data.foreach_stmt.key_var, create_string_value(keys[i]));
-                        env_define(current_env, node->data.foreach_stmt.value_var, dict_get(dict, keys[i]));
-
                         if (setjmp(continue_jmp) == 0) {
+                            Environment *iter_env = create_environment(loop_base);
+                            Environment *prev_env = current_env;
+                            current_env = iter_env;
+                            env_define(current_env, node->data.foreach_stmt.key_var, create_string_value(keys[i]));
+                            env_define(current_env, node->data.foreach_stmt.value_var, dict_get(dict, keys[i]));
                             ASTNodeList *stmt = node->data.foreach_stmt.body;
                             while (stmt != NULL && !has_returned) {
                                 eval_statement(stmt->node);
                                 stmt = stmt->next;
                             }
+                            current_env = prev_env;
                         }
                     }
 
@@ -1325,14 +2130,18 @@ static void eval_statement(ASTNode *node) {
                     exit(1);
                 }
             }
+            loop_env_top--;
+            current_env = loop_base;
             break;
         }
 
         case NODE_BREAK:
+            if (loop_env_top > 0) current_env = loop_env_stack[loop_env_top - 1];
             longjmp(break_jmp, 1);
             break;
 
         case NODE_CONTINUE:
+            if (loop_env_top > 0) current_env = loop_env_stack[loop_env_top - 1];
             longjmp(continue_jmp, 1);
             break;
 

@@ -15,6 +15,7 @@ typedef struct StringLiteral {
 typedef struct VarMapping {
     char *original_name;
     char *unique_name;
+    int is_global;
     struct VarMapping *next;
 } VarMapping;
 

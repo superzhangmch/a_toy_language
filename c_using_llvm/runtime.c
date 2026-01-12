@@ -1,9 +1,15 @@
 #include "runtime.h"
 #include <regex.h>
+#include <math.h>
+#include <ctype.h>
+#include <setjmp.h>
 
 // Global storage for command line arguments
 static int g_argc = 0;
 static char **g_argv = NULL;
+static jmp_buf try_stack[256];
+static int try_top = 0;
+static Value current_exception = {TYPE_NULL, 0};
 
 // Array structure
 typedef struct {
@@ -26,6 +32,39 @@ typedef struct {
     int size;
 } Dict;
 
+// Class/object structures
+typedef struct MethodEntry {
+    char *name;
+    MethodFn fn;
+    int arity;
+    int is_private;
+} MethodEntry;
+
+typedef struct FieldEntry {
+    char *name;
+    FieldInitFn init_fn;
+    int is_private;
+} FieldEntry;
+
+typedef struct Class {
+    char *name;
+    MethodEntry *methods;
+    int method_count;
+    int method_capacity;
+    FieldEntry *fields;
+    int field_count;
+    int field_capacity;
+} Class;
+
+typedef struct Instance {
+    Class *cls;
+    Value fields; // dict value storing member fields
+} Instance;
+
+// Track current method call stack for privacy checks
+static Instance *this_stack[256];
+static int this_stack_top = 0;
+
 // Helper to create array
 static Array* new_array() {
     Array *a = malloc(sizeof(Array));
@@ -35,10 +74,28 @@ static Array* new_array() {
     return a;
 }
 
+static void push_this(Instance *inst) {
+    if (this_stack_top >= 256) return;
+    this_stack[this_stack_top++] = inst;
+}
+
+static void pop_this() {
+    if (this_stack_top > 0) this_stack_top--;
+}
+
+static int is_internal_access(Instance *inst) {
+    return this_stack_top > 0 && this_stack[this_stack_top - 1] == inst;
+}
+
 // Create empty array
 Value make_array(void) {
     Array *a = new_array();
     Value result = {TYPE_ARRAY, (long)a};
+    return result;
+}
+
+Value make_null(void) {
+    Value result = {TYPE_NULL, 0};
     return result;
 }
 
@@ -197,6 +254,14 @@ Value type(Value v) {
         type_name = "string";
     } else if (v.type == TYPE_ARRAY) {
         type_name = "array";
+    } else if (v.type == TYPE_DICT) {
+        type_name = "dict";
+    } else if (v.type == TYPE_CLASS) {
+        type_name = "class";
+    } else if (v.type == TYPE_INSTANCE) {
+        type_name = "instance";
+    } else if (v.type == TYPE_NULL) {
+        type_name = "null";
     } else {
         type_name = "unknown";
     }
@@ -558,6 +623,23 @@ Value binary_op(Value left, int op, Value right) {
     
     switch (op) {
         case 0: { // ADD
+            // Array concatenation
+            if (left.type == TYPE_ARRAY && right.type == TYPE_ARRAY) {
+                Array *la = (Array*)left.data;
+                Array *ra = (Array*)right.data;
+                Array *na = new_array();
+                Value arr_val = {TYPE_ARRAY, (long)na};
+                Value *le = (Value*)la->data;
+                Value *re = (Value*)ra->data;
+                for (int i = 0; i < la->size; i++) {
+                    append(arr_val, le[i]);
+                }
+                for (int i = 0; i < ra->size; i++) {
+                    append(arr_val, re[i]);
+                }
+                return arr_val;
+            }
+
             // String concatenation
             if (left.type == TYPE_STRING || right.type == TYPE_STRING) {
                 char buf[1024];
@@ -1089,6 +1171,590 @@ Value str_join(Value arr_val, Value sep_val) {
     return result;
 }
 
+// ===== Misc Helpers =====
+
+static double value_to_double(Value v) {
+    switch (v.type) {
+        case TYPE_INT: return (double)v.data;
+        case TYPE_FLOAT: return *(double*)&v.data;
+        case TYPE_STRING: return atof((char*)v.data);
+        default: return 0.0;
+    }
+}
+
+Value remove_entry(Value obj, Value key_or_index) {
+    if (obj.type == TYPE_ARRAY) {
+        if (key_or_index.type != TYPE_INT) {
+            Value r = {TYPE_INT, 0};
+            return r;
+        }
+        Array *arr = (Array*)obj.data;
+        long idx = key_or_index.data;
+        if (idx < 0 || idx >= arr->size) {
+            Value r = {TYPE_INT, 0};
+            return r;
+        }
+        Value *elements = (Value*)arr->data;
+        for (long i = idx; i < arr->size - 1; i++) {
+            elements[i] = elements[i + 1];
+        }
+        arr->size--;
+        Value r = {TYPE_INT, 1};
+        return r;
+    }
+
+    if (obj.type == TYPE_DICT) {
+        if (key_or_index.type != TYPE_STRING) {
+            Value r = {TYPE_INT, 0};
+            return r;
+        }
+        const char *key = (char*)key_or_index.data;
+        unsigned int idx = hash(key);
+        Dict *dict = (Dict*)obj.data;
+        DictEntry *entry = dict->buckets[idx];
+        DictEntry *prev = NULL;
+        while (entry != NULL) {
+            if (strcmp(entry->key, key) == 0) {
+                if (prev == NULL) {
+                    dict->buckets[idx] = entry->next;
+                } else {
+                    prev->next = entry->next;
+                }
+                free(entry->key);
+                free(entry);
+                dict->size--;
+                Value r = {TYPE_INT, 1};
+                return r;
+            }
+            prev = entry;
+            entry = entry->next;
+        }
+        Value r = {TYPE_INT, 0};
+        return r;
+    }
+
+    Value r = {TYPE_INT, 0};
+    return r;
+}
+
+Value math_fn(Value op, Value a, Value b, int arg_count) {
+    if (op.type != TYPE_STRING) {
+        fprintf(stderr, "math() first argument must be operation string\n");
+        exit(1);
+    }
+    char *name = (char*)op.data;
+
+    if (strcmp(name, "sin") == 0 || strcmp(name, "cos") == 0 ||
+        strcmp(name, "asin") == 0 || strcmp(name, "acos") == 0 ||
+        strcmp(name, "log") == 0 || strcmp(name, "exp") == 0 ||
+        strcmp(name, "ceil") == 0 || strcmp(name, "floor") == 0 ||
+        strcmp(name, "round") == 0) {
+        if (arg_count != 1) {
+            fprintf(stderr, "math(%s) requires 1 argument\n", name);
+            exit(1);
+        }
+        double val = value_to_double(a);
+        double res;
+        if (strcmp(name, "sin") == 0) res = sin(val);
+        else if (strcmp(name, "cos") == 0) res = cos(val);
+        else if (strcmp(name, "asin") == 0) res = asin(val);
+        else if (strcmp(name, "acos") == 0) res = acos(val);
+        else if (strcmp(name, "log") == 0) res = log(val);
+        else if (strcmp(name, "exp") == 0) res = exp(val);
+        else if (strcmp(name, "ceil") == 0) res = ceil(val);
+        else if (strcmp(name, "floor") == 0) res = floor(val);
+        else res = round(val);
+        Value result = {TYPE_FLOAT, *(long*)&res};
+        return result;
+    }
+
+    if (strcmp(name, "pow") == 0) {
+        if (arg_count != 2) {
+            fprintf(stderr, "math(pow) requires 2 arguments\n");
+            exit(1);
+        }
+        double va = value_to_double(a);
+        double vb = value_to_double(b);
+        double res = pow(va, vb);
+        Value result = {TYPE_FLOAT, *(long*)&res};
+        return result;
+    }
+
+    if (strcmp(name, "random") == 0) {
+        if (arg_count == 0) {
+            double r = (double)rand() / (double)RAND_MAX;
+            Value result = {TYPE_FLOAT, *(long*)&r};
+            return result;
+        }
+        if (arg_count == 2) {
+            double va = value_to_double(a);
+            double vb = value_to_double(b);
+            double r = (double)rand() / (double)RAND_MAX;
+            double res = va + (vb - va) * r;
+            Value result = {TYPE_FLOAT, *(long*)&res};
+            return result;
+        }
+        fprintf(stderr, "math(random) requires 0 or 2 arguments\n");
+        exit(1);
+    }
+
+    fprintf(stderr, "math(): unsupported op %s\n", name);
+    exit(1);
+}
+
+// ===== JSON Helpers =====
+static int json_error_rt = 0;
+
+static const char* skip_ws_c(const char *p) {
+    while (*p && isspace((unsigned char)*p)) p++;
+    return p;
+}
+
+static Value parse_json_value_rt(const char **p);
+
+static Value parse_json_string_rt(const char **p) {
+    char quote = **p;
+    (*p)++;
+    char buf[4096];
+    int idx = 0;
+    while (**p && **p != quote) {
+        if (**p == '\\') {
+            (*p)++;
+            char esc = **p;
+            switch (esc) {
+                case '"': buf[idx++] = '"'; break;
+                case '\'': buf[idx++] = '\''; break;
+                case '\\': buf[idx++] = '\\'; break;
+                case 'n': buf[idx++] = '\n'; break;
+                case 't': buf[idx++] = '\t'; break;
+                case 'r': buf[idx++] = '\r'; break;
+                default: buf[idx++] = esc; break;
+            }
+        } else {
+            buf[idx++] = **p;
+        }
+        (*p)++;
+        if (idx >= 4095) break;
+    }
+    buf[idx] = '\0';
+    if (**p == quote) (*p)++;
+    char *res = strdup(buf);
+    Value v = {TYPE_STRING, (long)res};
+    return v;
+}
+
+static Value parse_json_number_rt(const char **p) {
+    char *endptr;
+    double d = strtod(*p, &endptr);
+    int is_float = 0;
+    for (const char *q = *p; q < endptr; q++) {
+        if (*q == '.' || *q == 'e' || *q == 'E') { is_float = 1; break; }
+    }
+    *p = endptr;
+    if (is_float) {
+        Value v = {TYPE_FLOAT, *(long*)&d};
+        return v;
+    } else {
+        Value v = {TYPE_INT, (long)d};
+        return v;
+    }
+}
+
+static int match_word_rt(const char **p, const char *word) {
+    const char *s = *p;
+    while (*word) {
+        if (tolower((unsigned char)*s) != tolower((unsigned char)*word)) return 0;
+        s++; word++;
+    }
+    *p = s;
+    return 1;
+}
+
+static Value parse_json_array_rt(const char **p) {
+    if (**p != '[') { json_error_rt = 1; Value v = {TYPE_INT,0}; return v; }
+    (*p)++; // skip '['
+    Value arr = make_array();
+    *p = skip_ws_c(*p);
+    if (**p == ']') { (*p)++; return arr; }
+    int closed = 0;
+    while (**p) {
+        Value v = parse_json_value_rt(p);
+        append(arr, v);
+        *p = skip_ws_c(*p);
+        if (**p == ',') {
+            (*p)++;
+            *p = skip_ws_c(*p);
+            if (**p == ']') { (*p)++; closed = 1; break; }
+        } else if (**p == ']') { (*p)++; closed = 1; break; }
+        else { json_error_rt = 1; break; }
+    }
+    if (!closed) json_error_rt = 1;
+    return arr;
+}
+
+static Value parse_json_object_rt(const char **p) {
+    if (**p != '{') { json_error_rt = 1; Value v = {TYPE_INT,0}; return v; }
+    (*p)++; // skip '{'
+    Value dict = make_dict();
+    *p = skip_ws_c(*p);
+    if (**p == '}') { (*p)++; return dict; }
+    int closed = 0;
+    while (**p) {
+        *p = skip_ws_c(*p);
+        if (**p != '"' && **p != '\'') { json_error_rt = 1; break; }
+        Value key = parse_json_string_rt(p);
+        *p = skip_ws_c(*p);
+        if (**p == ':') (*p)++;
+        else { json_error_rt = 1; break; }
+        *p = skip_ws_c(*p);
+        Value val = parse_json_value_rt(p);
+        dict_set(dict, key, val);
+        *p = skip_ws_c(*p);
+        if (**p == ',') {
+            (*p)++;
+            *p = skip_ws_c(*p);
+            if (**p == '}') { (*p)++; closed = 1; break; }
+        } else if (**p == '}') { (*p)++; closed = 1; break; }
+        else { json_error_rt = 1; break; }
+    }
+    if (!closed) json_error_rt = 1;
+    return dict;
+}
+
+static Value parse_json_value_rt(const char **p) {
+    *p = skip_ws_c(*p);
+    char c = **p;
+    if (c == '"' || c == '\'') return parse_json_string_rt(p);
+    if (c == '[') return parse_json_array_rt(p);
+    if (c == '{') return parse_json_object_rt(p);
+    if (isdigit((unsigned char)c) || c == '-') return parse_json_number_rt(p);
+    if (match_word_rt(p, "true")) { Value v = {TYPE_INT, 1}; return v; }
+    if (match_word_rt(p, "false")) { Value v = {TYPE_INT, 0}; return v; }
+    if (match_word_rt(p, "null")) { Value v = {TYPE_NULL, 0}; return v; }
+    json_error_rt = 1;
+    Value v = {TYPE_INT, 0};
+    return v;
+}
+
+static void sb_rt_append(char **buf, int *len, int *cap, const char *s) {
+    int sl = strlen(s);
+    if (*len + sl + 1 > *cap) {
+        *cap = (*cap + sl + 256);
+        *buf = realloc(*buf, *cap);
+    }
+    memcpy(*buf + *len, s, sl);
+    *len += sl;
+    (*buf)[*len] = '\0';
+}
+
+static void json_serialize_value_rt(Value v, char **buf, int *len, int *cap);
+
+static void json_serialize_string_rt(const char *s, char **buf, int *len, int *cap) {
+    sb_rt_append(buf, len, cap, "\"");
+    while (*s) {
+        if (*s == '"' || *s == '\\') {
+            char esc[3] = {'\\', *s, '\0'};
+            sb_rt_append(buf, len, cap, esc);
+        } else if (*s == '\n') sb_rt_append(buf, len, cap, "\\n");
+        else if (*s == '\t') sb_rt_append(buf, len, cap, "\\t");
+        else {
+            char ch[2] = {*s, '\0'};
+            sb_rt_append(buf, len, cap, ch);
+        }
+        s++;
+    }
+    sb_rt_append(buf, len, cap, "\"");
+}
+
+static void json_serialize_value_rt(Value v, char **buf, int *len, int *cap) {
+    switch (v.type) {
+        case TYPE_INT: {
+            char tmp[64]; snprintf(tmp, sizeof(tmp), "%ld", v.data);
+            sb_rt_append(buf, len, cap, tmp);
+            break;
+        }
+        case TYPE_FLOAT: {
+            double d = *(double*)&v.data;
+            char tmp[64]; snprintf(tmp, sizeof(tmp), "%g", d);
+            sb_rt_append(buf, len, cap, tmp);
+            break;
+        }
+        case TYPE_STRING:
+            json_serialize_string_rt((char*)v.data, buf, len, cap);
+            break;
+        case TYPE_ARRAY: {
+            sb_rt_append(buf, len, cap, "[");
+            Array *a = (Array*)v.data;
+            Value *ele = (Value*)a->data;
+            for (int i = 0; i < a->size; i++) {
+                json_serialize_value_rt(ele[i], buf, len, cap);
+                if (i < a->size - 1) sb_rt_append(buf, len, cap, ",");
+            }
+            sb_rt_append(buf, len, cap, "]");
+            break;
+        }
+        case TYPE_DICT: {
+            sb_rt_append(buf, len, cap, "{");
+            Dict *d = (Dict*)v.data;
+            int first = 1;
+            for (int i = 0; i < HASH_SIZE; i++) {
+                DictEntry *entry = d->buckets[i];
+                while (entry) {
+                    if (!first) sb_rt_append(buf, len, cap, ",");
+                    first = 0;
+                    json_serialize_string_rt(entry->key, buf, len, cap);
+                    sb_rt_append(buf, len, cap, ":");
+                    json_serialize_value_rt(entry->value, buf, len, cap);
+                    entry = entry->next;
+                }
+            }
+            sb_rt_append(buf, len, cap, "}");
+            break;
+        }
+        case TYPE_NULL:
+            sb_rt_append(buf, len, cap, "null");
+            break;
+        default:
+            sb_rt_append(buf, len, cap, "null");
+    }
+}
+
+Value json_decode_ctx(Value json_str, int line, char *file) {
+    if (json_str.type != TYPE_STRING) {
+        Value msg = {TYPE_STRING, (long)"json_decode expects a string"};
+        __raise(msg, line, file);
+    }
+    json_error_rt = 0;
+    const char *p = (char*)json_str.data;
+    Value v = parse_json_value_rt(&p);
+    p = skip_ws_c(p);
+    if (*p != '\0') json_error_rt = 1;
+    if (json_error_rt) {
+        Value msg = {TYPE_STRING, (long)"Invalid JSON string"};
+        __raise(msg, line, file);
+    }
+    return v;
+}
+
+Value json_decode(Value json_str) {
+    // Default wrapper when no source context is provided
+    return json_decode_ctx(json_str, 0, NULL);
+}
+
+Value json_encode(Value v) {
+    char *buf = malloc(256);
+    buf[0] = '\0';
+    int len = 0, cap = 256;
+    json_serialize_value_rt(v, &buf, &len, &cap);
+    Value res = {TYPE_STRING, (long)buf};
+    return res;
+}
+
+// ===== Exceptions =====
+void* __try_push_buf(void) {
+    if (try_top >= 256) {
+        fprintf(stderr, "Exception stack overflow\n");
+        exit(1);
+    }
+    return (void*)&try_stack[try_top++];
+}
+
+void __try_pop(void) {
+    if (try_top > 0) try_top--;
+}
+
+void __raise(Value msg, int line, char *file) {
+    char *mstr;
+    if (msg.type == TYPE_STRING) {
+        mstr = strdup((char*)msg.data);
+    } else {
+        Value s = to_string(msg);
+        mstr = strdup((char*)s.data);
+    }
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s:%d: %s", file ? file : "<input>", line, mstr);
+    free(mstr);
+    char *full = strdup(buf);
+    Value v = {TYPE_STRING, (long)full};
+    current_exception = v;
+    if (try_top > 0) {
+        longjmp(try_stack[try_top - 1], 1);
+    }
+    fprintf(stderr, "%s\n", full);
+    exit(1);
+}
+
+Value __get_exception(void) {
+    return current_exception;
+}
+
+// ===== Class/Object Runtime =====
+
+static MethodEntry* find_method_entry(Class *cls, const char *name) {
+    for (int i = 0; i < cls->method_count; i++) {
+        if (strcmp(cls->methods[i].name, name) == 0) {
+            return &cls->methods[i];
+        }
+    }
+    return NULL;
+}
+
+Value make_class(char *name) {
+    Class *cls = malloc(sizeof(Class));
+    cls->name = strdup(name);
+    cls->methods = NULL;
+    cls->method_count = 0;
+    cls->method_capacity = 0;
+    cls->fields = NULL;
+    cls->field_count = 0;
+    cls->field_capacity = 0;
+    Value v = {TYPE_CLASS, (long)cls};
+    return v;
+}
+
+void class_add_field(Value class_val, char *name, FieldInitFn init_fn, int is_private) {
+    if (class_val.type != TYPE_CLASS) return;
+    Class *cls = (Class*)class_val.data;
+    if (cls->field_count >= cls->field_capacity) {
+        cls->field_capacity = cls->field_capacity == 0 ? 4 : cls->field_capacity * 2;
+        cls->fields = realloc(cls->fields, cls->field_capacity * sizeof(FieldEntry));
+    }
+    cls->fields[cls->field_count].name = strdup(name);
+    cls->fields[cls->field_count].init_fn = init_fn;
+    cls->fields[cls->field_count].is_private = is_private;
+    cls->field_count++;
+}
+
+void class_add_method(Value class_val, char *name, MethodFn fn, int arity, int is_private) {
+    if (class_val.type != TYPE_CLASS) return;
+    Class *cls = (Class*)class_val.data;
+    if (cls->method_count >= cls->method_capacity) {
+        cls->method_capacity = cls->method_capacity == 0 ? 4 : cls->method_capacity * 2;
+        cls->methods = realloc(cls->methods, cls->method_capacity * sizeof(MethodEntry));
+    }
+    cls->methods[cls->method_count].name = strdup(name);
+    cls->methods[cls->method_count].fn = fn;
+    cls->methods[cls->method_count].arity = arity;
+    cls->methods[cls->method_count].is_private = is_private;
+    cls->method_count++;
+}
+
+Value instantiate_class(Value class_val, Value *args, int arg_count) {
+    if (class_val.type != TYPE_CLASS) {
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+    Class *cls = (Class*)class_val.data;
+
+    Instance *inst = malloc(sizeof(Instance));
+    inst->cls = cls;
+    inst->fields = make_dict();
+
+    Value inst_val = {TYPE_INSTANCE, (long)inst};
+
+    // Initialize fields
+    push_this(inst);
+    for (int i = 0; i < cls->field_count; i++) {
+        FieldEntry *f = &cls->fields[i];
+        Value key = {TYPE_STRING, (long)f->name};
+        Value val = f->init_fn ? f->init_fn(inst_val) : (Value){TYPE_INT, 0};
+        dict_set(inst->fields, key, val);
+    }
+    pop_this();
+
+    // Call constructor init if present
+    MethodEntry *init_m = find_method_entry(cls, "init");
+    if (init_m != NULL) {
+        if (arg_count != init_m->arity) {
+            fprintf(stderr, "Constructor for %s expects %d arguments, got %d\n", cls->name, init_m->arity, arg_count);
+            exit(1);
+        }
+        method_call(inst_val, "init", args, arg_count);
+    } else if (arg_count > 0) {
+        fprintf(stderr, "Class %s constructor does not take arguments\n", cls->name);
+        exit(1);
+    }
+
+    return inst_val;
+}
+
+Value member_get(Value instance, char *name) {
+    if (instance.type != TYPE_INSTANCE) {
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+    Instance *inst = (Instance*)instance.data;
+
+    int is_private = name[0] == '_';
+    if (is_private && !is_internal_access(inst)) {
+        fprintf(stderr, "Cannot access private member '%s' of class %s\n", name, inst->cls->name);
+        exit(1);
+    }
+
+    Value key = {TYPE_STRING, (long)name};
+    Value has = dict_has(inst->fields, key);
+    if (has.type == TYPE_INT && has.data == 1) {
+        return dict_get(inst->fields, key);
+    }
+
+    MethodEntry *m = find_method_entry(inst->cls, name);
+    if (m != NULL) {
+        // Return a placeholder; actual call should go through method_call
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+
+    fprintf(stderr, "Member '%s' not found on class %s\n", name, inst->cls->name);
+    exit(1);
+}
+
+Value member_set(Value instance, char *name, Value val) {
+    if (instance.type != TYPE_INSTANCE) {
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+    Instance *inst = (Instance*)instance.data;
+
+    int is_private = name[0] == '_';
+    if (is_private && !is_internal_access(inst)) {
+        fprintf(stderr, "Cannot access private member '%s' of class %s\n", name, inst->cls->name);
+        exit(1);
+    }
+
+    Value key = {TYPE_STRING, (long)name};
+    dict_set(inst->fields, key, val);
+    return val;
+}
+
+Value method_call(Value instance, char *name, Value *args, int arg_count) {
+    if (instance.type != TYPE_INSTANCE) {
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+    Instance *inst = (Instance*)instance.data;
+
+    MethodEntry *m = find_method_entry(inst->cls, name);
+    if (m == NULL) {
+        fprintf(stderr, "Method '%s' not found on class %s\n", name, inst->cls->name);
+        exit(1);
+    }
+
+    if (m->is_private && !is_internal_access(inst)) {
+        fprintf(stderr, "Cannot access private method '%s' of class %s\n", name, inst->cls->name);
+        exit(1);
+    }
+
+    if (arg_count != m->arity) {
+        fprintf(stderr, "Method %s expects %d arguments, got %d\n", name, m->arity, arg_count);
+        exit(1);
+    }
+
+    push_this(inst);
+    Value result = m->fn(instance, args, arg_count);
+    pop_this();
+    return result;
+}
+
 // Recursive print helper for arrays and dicts
 static void print_value_recursive(Value v) {
     switch (v.type) {
@@ -1131,6 +1797,9 @@ static void print_value_recursive(Value v) {
             printf("}");
             break;
         }
+        case TYPE_NULL:
+            printf("null");
+            break;
         default:
             printf("<object>");
     }
@@ -1153,6 +1822,9 @@ void print_value(Value v) {
                 printf("%g", *fp);
                 break;
             }
+            case TYPE_NULL:
+                printf("null");
+                break;
             default:
                 printf("<object>");
         }

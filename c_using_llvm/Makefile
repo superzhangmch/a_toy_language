@@ -1,20 +1,21 @@
 CC = gcc
 CFLAGS = -Wall -g -Icore
+LIBS = -lm
 FLEX = flex
 BISON = bison
 
 # Interpreter version
-INTERP_SRCS = interpreter_main.c core/ast.c interpreter.c core/tiny.tab.c core/lex.yy.c
+INTERP_SRCS = interpreter_main.c core/ast.c interpreter.c core/tiny.tab.c core/lex.yy.c core/preprocess.c
 INTERP_OBJS = $(INTERP_SRCS:.c=.o)
 INTERP_TARGET = interpreter
 
 # Compiler version (C code generator)
-COMPILER_SRCS = c_codegen_main.c core/ast.c c_codegen.c core/tiny.tab.c core/lex.yy.c
+COMPILER_SRCS = c_codegen_main.c core/ast.c c_codegen.c core/tiny.tab.c core/lex.yy.c core/preprocess.c
 COMPILER_OBJS = $(COMPILER_SRCS:.c=.o)
 COMPILER_TARGET = c_codegen
 
 # LLVM backend compiler
-LLVM_SRCS = codegen_llvm_main.c core/ast.c codegen_llvm.c core/tiny.tab.c core/lex.yy.c
+LLVM_SRCS = codegen_llvm_main.c core/ast.c codegen_llvm.c core/tiny.tab.c core/lex.yy.c core/preprocess.c
 LLVM_OBJS = $(LLVM_SRCS:.c=.o)
 LLVM_TARGET = codegen_llvm
 
@@ -29,17 +30,20 @@ core/tiny.tab.c core/tiny.tab.h: core/tiny.y
 core/lex.yy.c: core/tiny.l core/tiny.tab.h
 	$(FLEX) -o core/lex.yy.c core/tiny.l
 
+# Ensure headers are generated before compiling sources that include them
+core/ast.o: core/tiny.tab.h
+
 $(INTERP_TARGET): $(INTERP_OBJS)
-	$(CC) $(CFLAGS) -o $(INTERP_TARGET) $(INTERP_OBJS)
+	$(CC) $(CFLAGS) -o $(INTERP_TARGET) $(INTERP_OBJS) $(LIBS)
 
 $(COMPILER_TARGET): $(COMPILER_OBJS)
-	$(CC) $(CFLAGS) -o $(COMPILER_TARGET) $(COMPILER_OBJS)
+	$(CC) $(CFLAGS) -o $(COMPILER_TARGET) $(COMPILER_OBJS) $(LIBS)
 
 $(RUNTIME): runtime.c runtime.h
 	$(CC) -c runtime.c -o $(RUNTIME)
 
 $(LLVM_TARGET): $(LLVM_OBJS) $(RUNTIME)
-	$(CC) $(CFLAGS) -o $(LLVM_TARGET) $(LLVM_OBJS)
+	$(CC) $(CFLAGS) -o $(LLVM_TARGET) $(LLVM_OBJS) $(LIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@

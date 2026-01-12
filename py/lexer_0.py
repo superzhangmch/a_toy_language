@@ -17,6 +17,11 @@ class TokenType(Enum):
     STRING = auto()
     TRUE = auto()
     FALSE = auto()
+    NULL = auto()
+    TRY = auto()
+    CATCH = auto()
+    RAISE = auto()
+    ASSERT = auto()
 
     # Identifiers and keywords
     IDENTIFIER = auto()
@@ -31,6 +36,8 @@ class TokenType(Enum):
     IN = auto()
     BREAK = auto()
     CONTINUE = auto()
+    CLASS = auto()
+    NEW = auto()
 
     # Operators
     ARROW = auto()  # =>
@@ -68,6 +75,7 @@ class TokenType(Enum):
     COMMA = auto()
     COLON = auto()
     SEMICOLON = auto()
+    DOT = auto()
 
     # Special
     EOF = auto()
@@ -80,16 +88,17 @@ class Token:
     value: any
     line: int
     column: int
+    filename: str = "<input>"
 
 
 class Lexer:
-    def __init__(self, source: str):
+    def __init__(self, source: str, mapping=None):
         self.source = source
         self.pos = 0
         self.line = 1
         self.column = 1
         self.tokens: List[Token] = []
-
+        self.mapping = mapping or []
         self.keywords = {
             'var': TokenType.VAR,
             'func': TokenType.FUNC,
@@ -102,12 +111,30 @@ class Lexer:
             'in': TokenType.IN,
             'break': TokenType.BREAK,
             'continue': TokenType.CONTINUE,
+            'class': TokenType.CLASS,
+            'new': TokenType.NEW,
             'true': TokenType.TRUE,
             'false': TokenType.FALSE,
+            'null': TokenType.NULL,
+            'try': TokenType.TRY,
+            'catch': TokenType.CATCH,
+            'raise': TokenType.RAISE,
+            'assert': TokenType.ASSERT,
             'and': TokenType.AND,
             'or': TokenType.OR,
             'not': TokenType.NOT,
         }
+
+    def map_line(self, line: int):
+        file = "<input>"
+        lnum = line
+        for start, fname, fline in self.mapping:
+            if line >= start:
+                file = fname
+                lnum = fline + (line - start)
+            else:
+                break
+        return file, lnum
 
     def error(self, msg: str):
         raise Exception(f"Lexer error at line {self.line}, column {self.column}: {msg}")
@@ -281,7 +308,7 @@ class Lexer:
                     self.advance()
                     self.tokens.append(Token(TokenType.NE, None, start_line, start_column))
                 else:
-                    self.error(f"Unexpected character: {char}")
+                    self.tokens.append(Token(TokenType.NOT, None, start_line, start_column))
 
             elif char == '<':
                 self.advance()
@@ -335,8 +362,16 @@ class Lexer:
                 self.advance()
                 self.tokens.append(Token(TokenType.SEMICOLON, None, start_line, start_column))
 
+            elif char == '.':
+                self.advance()
+                self.tokens.append(Token(TokenType.DOT, None, start_line, start_column))
+
             else:
                 self.error(f"Unexpected character: {char}")
 
         self.tokens.append(Token(TokenType.EOF, None, self.line, self.column))
+        if self.mapping:
+            for i, t in enumerate(self.tokens):
+                fname, lnum = self.map_line(t.line)
+                self.tokens[i] = Token(t.type, t.value, lnum, t.column, fname)
         return self.tokens

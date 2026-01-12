@@ -7,6 +7,10 @@ typedef enum {
     NODE_FLOAT_LITERAL,
     NODE_STRING_LITERAL,
     NODE_BOOL_LITERAL,
+    NODE_NULL_LITERAL,
+    NODE_TRY_CATCH,
+    NODE_RAISE,
+    NODE_ASSERT,
     NODE_IDENTIFIER,
     NODE_BINARY_OP,
     NODE_UNARY_OP,
@@ -24,7 +28,11 @@ typedef enum {
     NODE_DICT_LITERAL,
     NODE_DICT_PAIR,
     NODE_INDEX_ACCESS,
-    NODE_SLICE_ACCESS
+    NODE_SLICE_ACCESS,
+    NODE_CLASS_DEF,
+    NODE_MEMBER_ACCESS,
+    NODE_METHOD_CALL,
+    NODE_NEW_EXPR
 } NodeType;
 
 typedef enum {
@@ -43,6 +51,8 @@ struct ASTNodeList {
 
 struct ASTNode {
     NodeType type;
+    int line;
+    char *file;
     union {
         struct {
             ASTNodeList *statements;
@@ -145,6 +155,43 @@ struct ASTNode {
             ASTNode *start;
             ASTNode *end;
         } slice_access;
+
+        struct {
+            char *name;
+            ASTNodeList *members;  // Var declarations
+            ASTNodeList *methods;  // Function definitions
+        } class_def;
+
+        struct {
+            ASTNodeList *try_block;
+            char *catch_var;
+            ASTNodeList *catch_block;
+        } try_catch;
+
+        struct {
+            ASTNode *expr;
+        } raise_stmt;
+
+        struct {
+            ASTNode *expr;
+            ASTNode *msg;
+        } assert_stmt;
+
+        struct {
+            ASTNode *object;
+            char *member;
+        } member_access;
+
+        struct {
+            ASTNode *object;
+            char *method;
+            ASTNodeList *arguments;
+        } method_call;
+
+        struct {
+            char *class_name;
+            ASTNodeList *arguments;
+        } new_expr;
     } data;
 };
 
@@ -154,6 +201,10 @@ ASTNode *create_int_literal(int value);
 ASTNode *create_float_literal(double value);
 ASTNode *create_string_literal(char *value);
 ASTNode *create_bool_literal(int value);
+ASTNode *create_null_literal();
+ASTNode *create_try_catch(ASTNodeList *try_block, char *catch_var, ASTNodeList *catch_block);
+ASTNode *create_raise(ASTNode *expr);
+ASTNode *create_assert(ASTNode *expr, ASTNode *msg);
 ASTNode *create_identifier(char *name);
 ASTNode *create_binary_op(ASTNode *left, Operator op, ASTNode *right);
 ASTNode *create_unary_op(Operator op, ASTNode *operand);
@@ -173,6 +224,10 @@ ASTNode *create_dict_literal(ASTNodeList *pairs);
 ASTNode *create_dict_pair(ASTNode *key, ASTNode *value);
 ASTNode *create_index_access(ASTNode *object, ASTNode *index);
 ASTNode *create_slice_access(ASTNode *object, ASTNode *start, ASTNode *end);
+ASTNode *create_class_def(char *name, ASTNodeList *members, ASTNodeList *methods);
+ASTNode *create_member_access(ASTNode *object, char *member);
+ASTNode *create_method_call(ASTNode *object, char *method, ASTNodeList *arguments);
+ASTNode *create_new_expression(char *class_name, ASTNodeList *arguments);
 
 /* List functions */
 ASTNodeList *create_node_list(ASTNode *node);

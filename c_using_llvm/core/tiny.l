@@ -30,8 +30,16 @@ extern int yylineno;
 "in"                    { return IN; }
 "break"                 { return BREAK; }
 "continue"              { return CONTINUE; }
+"class"                 { return CLASS; }
+"new"                   { return NEW; }
+"try"                   { return TRY; }
+"catch"                 { return CATCH; }
+"raise"                 { return RAISE; }
+"assert"                { return ASSERT; }
 "true"                  { yylval.bval = 1; return TRUE; }
 "false"                 { yylval.bval = 0; return FALSE; }
+"null"                  { return NULL_LITERAL; }
+"NULL"                  { return NULL_LITERAL; }
 "and"                   { return AND; }
 "or"                    { return OR; }
 "not"                   { return NOT; }
@@ -41,7 +49,7 @@ extern int yylineno;
 [0-9]+\.[0-9]+          { yylval.fval = atof(yytext); return FLOAT; }
 [0-9]+                  { yylval.ival = atoi(yytext); return INTEGER; }
 
-\"([^"\\]|\\.)*\"       {
+\"([^"\\]|\\.|\\n)*\"       {
                             yylval.sval = strndup(yytext + 1, strlen(yytext) - 2);
                             /* Process escape sequences */
                             char *p = yylval.sval;
@@ -65,8 +73,76 @@ extern int yylineno;
                             return STRING;
                         }
 
-\'([^'\\]|\\.)*\'       {
+'([^'\\]|\\.|\\n)*'       {
                             yylval.sval = strndup(yytext + 1, strlen(yytext) - 2);
+                            return STRING;
+                        }
+
+\"\"\"                 {
+                            int cap = 1024, len = 0;
+                            char *buf = malloc(cap);
+                            while (1) {
+                                int c = input();
+                                if (c == 0) break;
+                                if (c == '\n') yylineno++;
+                                if (c == '"') {
+                                    int c1 = input();
+                                    int c2 = input();
+                                    if (c1 == '"' && c2 == '"') {
+                                        break;
+                                    } else {
+                                        unput(c2);
+                                        unput(c1);
+                                        buf[len++] = '"';
+                                    }
+                                } else if (c == '\\') {
+                                    int next = input();
+                                    if (next == 'n') buf[len++] = '\n';
+                                    else if (next == 't') buf[len++] = '\t';
+                                    else if (next == '"') buf[len++] = '"';
+                                    else if (next == '\\') buf[len++] = '\\';
+                                    else { buf[len++] = next; }
+                                } else {
+                                    buf[len++] = c;
+                                }
+                                if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); }
+                            }
+                            buf[len] = '\0';
+                            yylval.sval = buf;
+                            return STRING;
+                        }
+
+\'\'\'                 {
+                            int cap = 1024, len = 0;
+                            char *buf = malloc(cap);
+                            while (1) {
+                                int c = input();
+                                if (c == 0) break;
+                                if (c == '\n') yylineno++;
+                                if (c == '\'') {
+                                    int c1 = input();
+                                    int c2 = input();
+                                    if (c1 == '\'' && c2 == '\'') {
+                                        break;
+                                    } else {
+                                        unput(c2);
+                                        unput(c1);
+                                        buf[len++] = '\'';
+                                    }
+                                } else if (c == '\\') {
+                                    int next = input();
+                                    if (next == 'n') buf[len++] = '\n';
+                                    else if (next == 't') buf[len++] = '\t';
+                                    else if (next == '\'') buf[len++] = '\'';
+                                    else if (next == '\\') buf[len++] = '\\';
+                                    else { buf[len++] = next; }
+                                } else {
+                                    buf[len++] = c;
+                                }
+                                if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); }
+                            }
+                            buf[len] = '\0';
+                            yylval.sval = buf;
                             return STRING;
                         }
 
@@ -84,6 +160,7 @@ extern int yylineno;
 
 "=="                    { return EQ; }
 "!="                    { return NE; }
+"!"                     { return NOT; }
 "<="                    { return LE; }
 ">="                    { return GE; }
 "<"                     { return LT; }
@@ -100,6 +177,7 @@ extern int yylineno;
 ","                     { return COMMA; }
 ":"                     { return COLON; }
 ";"                     { return SEMICOLON; }
+"."                     { return DOT; }
 
 .                       { fprintf(stderr, "Unexpected character: %s at line %d\n", yytext, yylineno); }
 

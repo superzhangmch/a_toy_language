@@ -37,6 +37,29 @@ class BoolLiteral(ASTNode):
 
 
 @dataclass
+class NullLiteral(ASTNode):
+    pass
+
+
+@dataclass
+class TryCatch(ASTNode):
+    try_block: List[ASTNode]
+    catch_var: str
+    catch_block: List[ASTNode]
+
+
+@dataclass
+class Raise(ASTNode):
+    expr: ASTNode
+
+
+@dataclass
+class Assert(ASTNode):
+    expr: ASTNode
+    msg: Optional[ASTNode]
+
+
+@dataclass
 class ArrayLiteral(ASTNode):
     elements: List[ASTNode]
 
@@ -112,6 +135,25 @@ class FunctionCall(ASTNode):
 
 
 @dataclass
+class MethodCall(ASTNode):
+    '''
+    对象方法调用: obj.method(arguments)
+    '''
+    object: ASTNode
+    method: str
+    arguments: List[ASTNode]
+
+
+@dataclass
+class MemberAccess(ASTNode):
+    '''
+    对象属性访问: obj.member
+    '''
+    object: ASTNode
+    member: str
+
+
+@dataclass
 class Return(ASTNode):
     value: Optional[ASTNode]
 
@@ -162,3 +204,22 @@ class Break(ASTNode):
 @dataclass
 class Continue(ASTNode):
     pass
+
+
+@dataclass
+class ClassDef(ASTNode):
+    '''
+    class Name { var fields; func methods() { ... } }
+    '''
+    name: str
+    members: List[VarDeclaration]
+    methods: List[FunctionDef]
+
+
+@dataclass
+class NewExpression(ASTNode):
+    '''
+    new ClassName(args)
+    '''
+    class_name: str
+    arguments: List[ASTNode]

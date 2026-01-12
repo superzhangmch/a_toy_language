@@ -11,12 +11,19 @@
 #define TYPE_STRING 2
 #define TYPE_ARRAY 3
 #define TYPE_DICT 4
+#define TYPE_CLASS 5
+#define TYPE_INSTANCE 6
+#define TYPE_NULL 7
 
 // Value structure matching LLVM IR
 typedef struct {
     int type;
     long data;
 } Value;
+
+// Class/instance helpers
+typedef Value (*MethodFn)(Value this_val, Value *args, int arg_count);
+typedef Value (*FieldInitFn)(Value this_val);
 
 // Runtime functions
 Value make_array(void);
@@ -30,6 +37,7 @@ Value to_int(Value v);
 Value to_float(Value v);
 Value to_string(Value v);
 Value str(Value v);
+Value make_null(void);
 Value type(Value v);
 Value slice_access(Value obj, Value start_v, Value end_v);
 Value input(Value prompt);
@@ -59,8 +67,32 @@ Value regexp_replace(Value pattern, Value str, Value replacement);
 Value str_split(Value str, Value separator);
 Value str_join(Value arr, Value separator);
 
+// JSON helpers
+Value json_encode(Value json_str);
+Value json_decode(Value v);
+Value json_decode_ctx(Value v, int line, char *file);
+
+// Exception helpers
+void* __try_push_buf(void);
+void __try_pop(void);
+void __raise(Value msg, int line, char *file);
+Value __get_exception(void);
+
 // Print function (for LLVM codegen)
 void print_value(Value v);
+
+// Misc helpers
+Value remove_entry(Value obj, Value key_or_index);
+Value math_fn(Value op, Value a, Value b, int arg_count);
+
+// Class/object runtime
+Value make_class(char *name);
+void class_add_field(Value class_val, char *name, FieldInitFn init_fn, int is_private);
+void class_add_method(Value class_val, char *name, MethodFn fn, int arity, int is_private);
+Value instantiate_class(Value class_val, Value *args, int arg_count);
+Value member_get(Value instance, char *name);
+Value member_set(Value instance, char *name, Value val);
+Value method_call(Value instance, char *name, Value *args, int arg_count);
 
 // Command line arguments
 void set_cmd_args(int argc, char **argv);

@@ -61,10 +61,30 @@ class Function:
         self.env = env       # 维持函数内变量的作用域
 
 
+class ClassValue:
+    def __init__(self, name: str, members: List[VarDeclaration], methods: List[FunctionDef], env: Environment):
+        self.name = name
+        self.members = members
+        self.methods = {m.name: m for m in methods}
+        self.env = env  # 定义类时所在的作用域，实例化时可见
+
+
+class ClassInstance:
+    def __init__(self, class_value: ClassValue):
+        self.class_value = class_value
+        self.fields: Dict[str, Any] = {}  # 成员变量存储
+
+class TinyException(Exception):
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.message = message
+
+
 class Interpreter:
     def __init__(self):
         self.global_env = Environment()
         self.current_env = self.global_env
+        self.this_stack: List[ClassInstance] = []  # 跟踪当前方法调用链上的实例，用于权限校验
         self.setup_builtins()
 
     def setup_builtins(self):
@@ -108,6 +128,8 @@ class Interpreter:
                 return "float"
             elif isinstance(val, str):
                 return "string"
+            elif val is None:
+                return "null"
             elif isinstance(val, list):
                 return "array"
             elif isinstance(val, dict):
@@ -142,6 +164,73 @@ class Interpreter:
             if not isinstance(d, dict):
                 raise Exception("values() requires a dict")
             return list(d.values())
+
+        def builtin_remove(obj, key_or_idx):
+            if isinstance(obj, list):
+                if not isinstance(key_or_idx, int):
+                    return False
+                if key_or_idx < 0 or key_or_idx >= len(obj):
+                    return False
+                obj.pop(key_or_idx)
+                return True
+            if isinstance(obj, dict):
+                if not isinstance(key_or_idx, str):
+                    return False
+                if key_or_idx not in obj:
+                    return False
+                del obj[key_or_idx]
+                return True
+            return False
+
+        def builtin_math(op, *args):
+            import math, random, builtins
+            if not isinstance(op, str):
+                raise Exception("math() first arg must be operation string")
+            name = op
+            if name in ("sin", "cos", "asin", "acos", "log", "exp", "ceil", "floor", "round"):
+                if len(args) != 1:
+                    raise Exception(f"math({name}) requires 1 argument")
+                val = float(args[0])
+                if name == "round":
+                    return builtins.round(val)
+                fn = getattr(math, name)
+                return fn(val)
+            if name == "pow":
+                if len(args) != 2:
+                    raise Exception("math(pow) requires 2 arguments")
+                return math.pow(float(args[0]), float(args[1]))
+            if name == "random":
+                if len(args) == 0:
+                    return random.random()
+                if len(args) == 2:
+                    a, b = float(args[0]), float(args[1])
+                    return random.uniform(a, b)
+                raise Exception("math(random) requires 0 or 2 arguments")
+            raise Exception(f"math(): unsupported op {name}")
+
+        def builtin_json_decode(s):
+            import json, re
+            if not isinstance(s, str):
+                raise Exception("json_decode expects a string")
+            def normalize(txt: str) -> str:
+                txt = re.sub(r"(?m),\s*([}\]])", r"\1", txt)  # remove trailing commas
+                txt = re.sub(r"(?i)\\btrue\\b", "true", txt)
+                txt = re.sub(r"(?i)\\bfalse\\b", "false", txt)
+                txt = re.sub(r"(?i)\\bnull\\b", "null", txt)
+                # convert single-quoted strings to double
+                txt = re.sub(r"'([^'\\\\]*(?:\\\\.[^'\\\\]*)*)'", lambda m: '\"' + m.group(1).replace('\"', '\\\\\"') + '\"', txt)
+                return txt
+            try:
+                return json.loads(s)
+            except Exception:
+                try:
+                    return json.loads(normalize(s))
+                except Exception:
+                    raise TinyException("Invalid JSON string")
+
+        def builtin_json_encode(obj):
+            import json
+            return json.dumps(obj)
 
         def builtin_read(filename):
             """Read file contents and return as string"""
@@ -228,6 +317,10 @@ class Interpreter:
         self.global_env.define('pop', builtin_pop)
         self.global_env.define('keys', builtin_keys)
         self.global_env.define('values', builtin_values)
+        self.global_env.define('remove', builtin_remove)
+        self.global_env.define('math', builtin_math)
+        self.global_env.define('json_encode', builtin_json_encode)
+        self.global_env.define('json_decode', builtin_json_decode)
         self.global_env.define('read', builtin_read)
         self.global_env.define('write', builtin_write)
         self.global_env.define('regexp_match', builtin_regexp_match)
@@ -237,6 +330,104 @@ class Interpreter:
         self.global_env.define('str_join', builtin_str_join)
         self.global_env.define('cmd_args', builtin_cmd_args)
 
+    def is_internal_access(self, instance: ClassInstance) -> bool:
+        """
+        是否从同一个类的方法内部访问，用于处理私有成员/方法
+        """
+        return bool(self.this_stack) and self.this_stack[-1].class_value == instance.class_value
+
+    def get_member(self, instance: ClassInstance, name: str):
+        if not isinstance(instance, ClassInstance):
+            raise Exception("Member access only valid on class instances")
+        is_private = name.startswith('_')
+        if is_private and not self.is_internal_access(instance):
+            raise Exception(f"Cannot access private member '{name}' of class {instance.class_value.name}")
+
+        if name in instance.fields:
+            return instance.fields[name]
+
+        if name in instance.class_value.methods:
+            # 返回一个可调用对象，供 obj.method(...) 间接使用
+            def bound_method(*args):
+                return self.call_method(instance, name, list(args))
+            return bound_method
+
+        raise Exception(f"Member '{name}' not found on class {instance.class_value.name}")
+
+    def set_member(self, instance: ClassInstance, name: str, value: Any):
+        if not isinstance(instance, ClassInstance):
+            raise Exception("Member assignment only valid on class instances")
+
+        is_private = name.startswith('_')
+        if is_private and not self.is_internal_access(instance):
+            raise Exception(f"Cannot access private member '{name}' of class {instance.class_value.name}")
+
+        if name not in instance.fields:
+            raise Exception(f"Member '{name}' not defined on class {instance.class_value.name}")
+        instance.fields[name] = value
+
+    def instantiate_class(self, class_value: ClassValue, args: List[Any]) -> ClassInstance:
+        instance = ClassInstance(class_value)
+
+        # 实例化时，为成员变量求值
+        prev_env = self.current_env
+        init_env = Environment(class_value.env)
+        init_env.define('this', instance)
+        init_env.define('self', instance)
+        self.current_env = init_env
+        self.this_stack.append(instance)
+        try:
+            for member in class_value.members:
+                instance.fields[member.name] = self.eval_expression(member.value)
+        finally:
+            self.this_stack.pop()
+            self.current_env = prev_env
+
+        # 调用构造函数 init（若存在）
+        if 'init' in class_value.methods:
+            init_method = class_value.methods['init']
+            if len(args) != len(init_method.params):
+                raise Exception(f"Constructor for {class_value.name} expects {len(init_method.params)} arguments, got {len(args)}")
+            self.call_method(instance, 'init', args)
+        elif args:
+            raise Exception(f"Class {class_value.name} constructor does not take arguments")
+
+        return instance
+
+    def call_method(self, instance: ClassInstance, method_name: str, args: List[Any]):
+        if not isinstance(instance, ClassInstance):
+            raise Exception("Method call only valid on class instances")
+
+        method_def = instance.class_value.methods.get(method_name)
+        if not method_def:
+            raise Exception(f"Method '{method_name}' not found on class {instance.class_value.name}")
+
+        is_private = method_name.startswith('_')
+        if is_private and not self.is_internal_access(instance):
+            raise Exception(f"Cannot access private method '{method_name}' of class {instance.class_value.name}")
+
+        if len(args) != len(method_def.params):
+            raise Exception(f"Method {method_name} expects {len(method_def.params)} arguments, got {len(args)}")
+
+        func_env = Environment(instance.class_value.env)
+        func_env.define('this', instance)
+        func_env.define('self', instance)
+        for param, arg in zip(method_def.params, args):
+            func_env.define(param, arg)
+
+        prev_env = self.current_env
+        self.current_env = func_env
+        self.this_stack.append(instance)
+        try:
+            for stmt in method_def.body:
+                self.eval_statement(stmt)
+            return None
+        except ReturnException as e:
+            return e.value
+        finally:
+            self.this_stack.pop()
+            self.current_env = prev_env
+
     def interpret(self, program: Program):
         '''
         遍历执行每个 statement, 从而完成程序执行. note: 一个循环是作为一个 statement 出现的.
@@ -244,6 +435,16 @@ class Interpreter:
         '''
         for statement in program.statements:
             self.eval_statement(statement)
+
+    def _execute_block(self, statements):
+        """Execute statements in a new block scope."""
+        prev_env = self.current_env
+        self.current_env = Environment(prev_env)
+        try:
+            for stmt in statements:
+                self.eval_statement(stmt)
+        finally:
+            self.current_env = prev_env
 
     def eval_statement(self, node: ASTNode) -> Any:
         if isinstance(node, VarDeclaration):
@@ -271,11 +472,18 @@ class Interpreter:
                     raise Exception("Strings are immutable")
                 else:
                     raise Exception(f"Cannot index type {type(obj)}")
+            elif isinstance(node.target, MemberAccess):
+                obj = self.eval_expression(node.target.object)
+                self.set_member(obj, node.target.member, value)
 
         elif isinstance(node, FunctionDef):
             # 函数定义
             func = Function(node.name, node.params, node.body, self.current_env)
             self.current_env.define(node.name, func)
+
+        elif isinstance(node, ClassDef):
+            class_value = ClassValue(node.name, node.members, node.methods, self.current_env)
+            self.current_env.define(node.name, class_value)
 
         elif isinstance(node, Return):
             value = None if node.value is None else self.eval_expression(node.value)
@@ -285,11 +493,9 @@ class Interpreter:
             # if-else-then: 调用宿主语言的 if/else/then
             condition = self.eval_expression(node.condition)
             if self.is_truthy(condition):
-                for stmt in node.then_block:
-                    self.eval_statement(stmt)
+                self._execute_block(node.then_block)
             elif node.else_block:
-                for stmt in node.else_block:
-                    self.eval_statement(stmt)
+                self._execute_block(node.else_block)
 
         elif isinstance(node, WhileStatement):
             # while 循环: 调用宿主语言的 while 完成
@@ -298,8 +504,7 @@ class Interpreter:
                 if not self.is_truthy(condition):
                     break
                 try:
-                    for stmt in node.body:
-                        self.eval_statement(stmt)
+                    self._execute_block(node.body)
                 except BreakException:
                     break
                 except ContinueException:
@@ -313,30 +518,67 @@ class Interpreter:
                 # Array iteration
                 try:
                     for idx, value in enumerate(collection):
-                        self.current_env.define(node.key_var, idx)
-                        self.current_env.define(node.value_var, value)
                         try:
+                            prev_env = self.current_env
+                            iter_env = Environment(prev_env)
+                            iter_env.define(node.key_var, idx)
+                            iter_env.define(node.value_var, value)
+                            self.current_env = iter_env
                             for stmt in node.body:
                                 self.eval_statement(stmt)
                         except ContinueException:
                             continue
+                        finally:
+                            self.current_env = prev_env
                 except BreakException:
                     pass
             elif isinstance(collection, dict):
                 # Dict iteration
                 try:
                     for key, value in collection.items():
-                        self.current_env.define(node.key_var, key)
-                        self.current_env.define(node.value_var, value)
                         try:
+                            prev_env = self.current_env
+                            iter_env = Environment(prev_env)
+                            iter_env.define(node.key_var, key)
+                            iter_env.define(node.value_var, value)
+                            self.current_env = iter_env
                             for stmt in node.body:
                                 self.eval_statement(stmt)
                         except ContinueException:
                             continue
+                        finally:
+                            self.current_env = prev_env
                 except BreakException:
                     pass
             else:
                 raise RuntimeError(f"Cannot iterate over {type(collection)}")
+
+        elif isinstance(node, TryCatch):
+            try:
+                for stmt in node.try_block:
+                    self.eval_statement(stmt)
+            except TinyException as ex:
+                prev_env = self.current_env
+                catch_env = Environment(prev_env)
+                catch_env.define(node.catch_var, ex.message)
+                self.current_env = catch_env
+                for stmt in node.catch_block:
+                    self.eval_statement(stmt)
+                self.current_env = prev_env
+
+        elif isinstance(node, Raise):
+            msg_val = self.eval_expression(node.expr)
+            msg = self.to_string(msg_val)
+            loc = f"{getattr(node, 'file', '<input>')}:{getattr(node, 'line', 0)}"
+            raise TinyException(f"{loc}: {msg}")
+
+        elif isinstance(node, Assert):
+            cond = self.eval_expression(node.expr)
+            if not self.is_truthy(cond):
+                msg_val = self.eval_expression(node.msg) if node.msg is not None else "Assertion failed"
+                msg = self.to_string(msg_val)
+                loc = f"{getattr(node, 'file', '<input>')}:{getattr(node, 'line', 0)}"
+                raise TinyException(f"{loc}: {msg}")
 
         elif isinstance(node, Break):
             raise BreakException()
@@ -346,6 +588,9 @@ class Interpreter:
 
         elif isinstance(node, FunctionCall):
             # 函数调用
+            return self.eval_expression(node)
+
+        elif isinstance(node, MethodCall):
             return self.eval_expression(node)
 
         else:
@@ -364,6 +609,9 @@ class Interpreter:
         elif isinstance(node, BoolLiteral):
             return node.value
 
+        elif isinstance(node, NullLiteral):
+            return None
+
         elif isinstance(node, ArrayLiteral):
             return [self.eval_expression(elem) for elem in node.elements]
 
@@ -380,9 +628,16 @@ class Interpreter:
         elif isinstance(node, Identifier):
             return self.current_env.get(node.name)
 
+        elif isinstance(node, MemberAccess):
+            obj = self.eval_expression(node.object)
+            return self.get_member(obj, node.member)
+
         elif isinstance(node, BinaryOp):
             left = self.eval_expression(node.left)
             right = self.eval_expression(node.right)
+            # Array concatenation with +
+            if node.operator == '+' and isinstance(left, list) and isinstance(right, list):
+                return left + right
             return self.eval_binary_op(left, node.operator, right)
 
         elif isinstance(node, UnaryOp):
@@ -465,6 +720,18 @@ class Interpreter:
 
             raise Exception(f"{node.name} is not a function")
 
+        elif isinstance(node, MethodCall):
+            obj = self.eval_expression(node.object)
+            args = [self.eval_expression(arg) for arg in node.arguments]
+            return self.call_method(obj, node.method, args)
+
+        elif isinstance(node, NewExpression):
+            class_value = self.current_env.get(node.class_name)
+            if not isinstance(class_value, ClassValue):
+                raise Exception(f"{node.class_name} is not a class")
+            args = [self.eval_expression(arg) for arg in node.arguments]
+            return self.instantiate_class(class_value, args)
+
         else:
             raise Exception(f"Unknown expression type: {type(node)}")
 
@@ -516,6 +783,20 @@ class Interpreter:
         elif op == 'or':
             return self.is_truthy(left) or self.is_truthy(right)
 
+        elif op == 'in':
+            if isinstance(right, list):
+                return any(left == elem for elem in right)
+            elif isinstance(right, dict):
+                if not isinstance(left, str):
+                    raise Exception("Dictionary keys for 'in' must be strings")
+                return left in right
+            elif isinstance(right, str):
+                if not isinstance(left, str):
+                    raise Exception("Substring for 'in' must be a string")
+                return left in right
+            else:
+                raise Exception(f"'in' not supported for {type(right)}")
+
         else:
             raise Exception(f"Unknown binary operator: {op}")
 
@@ -539,3 +820,9 @@ class Interpreter:
         if isinstance(value, (list, dict)):
             return len(value) > 0
         return True
+
+    def to_string(self, value: Any) -> str:
+        try:
+            return str(value)
+        except Exception:
+            return "<object>"
