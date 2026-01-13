@@ -184,6 +184,17 @@ class WhileStatement(ASTNode):
 
 
 @dataclass
+class ForStatement(ASTNode):
+    '''
+    for (idx = start .. end) { body }
+    '''
+    index_var: str
+    start: ASTNode
+    end: ASTNode
+    body: List[ASTNode]
+
+
+@dataclass
 class ForeachStatement(ASTNode):
     '''
     foreach(key_var => value_var in collection) {

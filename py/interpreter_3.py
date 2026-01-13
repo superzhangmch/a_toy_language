@@ -33,7 +33,21 @@ class Environment:
 
     def define(self, name: str, value: Any):
         # 新建(define)变量
+        if name in self.variables:
+            raise Exception(f"Redefinition of '{name}' in the same scope")
         self.variables[name] = value
+
+    def exists_current(self, name: str) -> bool:
+        return name in self.variables
+
+    def set_or_define(self, name: str, value: Any):
+        if name in self.variables:
+            self.variables[name] = value
+        elif self.parent:
+            # Only write through to current scope if present; else create here
+            self.variables[name] = value
+        else:
+            self.variables[name] = value
 
     def get(self, name: str) -> Any:
         # 获得变量值
@@ -91,21 +105,49 @@ class Interpreter:
         '''
         内置函数
         '''
+        def fmt(val):
+            if isinstance(val, bool):
+                return "true" if val else "false"
+            if val is None:
+                return "null"
+            if isinstance(val, list):
+                return "[" + ", ".join(fmt(v) for v in val) + "]"
+            if isinstance(val, dict):
+                return "{" + ", ".join(f"\"{k}\": {fmt(v)}" for k, v in val.items()) + "}"
+            if isinstance(val, ClassInstance):
+                return "<object>"
+            return str(val)
+
         # Built-in functions
         def builtin_print(*args):
             # Print without automatic newline
-            print(*args, end='')
+            print(*(fmt(a) for a in args), end='')
             return None
 
         def builtin_println(*args):
             # Print with automatic newline
-            print(*args)
+            print(*(fmt(a) for a in args))
             return None
 
         def builtin_len(obj):
             if isinstance(obj, (list, dict, str)):
                 return len(obj)
             raise Exception(f"len() not supported for type {type(obj)}")
+
+        def builtin_str_trim(s, chars=" \t\n"):
+            if not isinstance(s, str):
+                raise Exception("str_trim expects string")
+            if not isinstance(chars, str):
+                raise Exception("str_trim chars must be string")
+            return s.strip(chars)
+
+        def builtin_str_format(fmt, *args):
+            if not isinstance(fmt, str):
+                raise Exception("str_format expects format string")
+            try:
+                return fmt % args
+            except Exception as e:
+                raise Exception(f"str_format error: {e}")
 
         def builtin_int(val):
             return int(val)
@@ -114,7 +156,7 @@ class Interpreter:
             return float(val)
 
         def builtin_str(val):
-            return str(val)
+            return fmt(val)
 
         def builtin_bool(val):
             return bool(val)
@@ -136,6 +178,10 @@ class Interpreter:
                 return "dict"
             elif isinstance(val, Function):
                 return "function"
+            elif isinstance(val, ClassInstance):
+                return val.class_value.name
+            elif isinstance(val, ClassValue):
+                return val.name
             return "unknown"
 
         def builtin_input(prompt=""):
@@ -187,12 +233,17 @@ class Interpreter:
             if not isinstance(op, str):
                 raise Exception("math() first arg must be operation string")
             name = op
-            if name in ("sin", "cos", "asin", "acos", "log", "exp", "ceil", "floor", "round"):
-                if len(args) != 1:
-                    raise Exception(f"math({name}) requires 1 argument")
+            if name in ("sin", "cos", "asin", "acos", "log", "exp", "ceil", "floor", "round", "sqrt"):
+                if len(args) < 1 or len(args) > 2:
+                    raise Exception(f"math({name}) requires 1 or 2 arguments")
                 val = float(args[0])
                 if name == "round":
-                    return builtins.round(val)
+                    digits = int(args[1]) if len(args) == 2 else 0
+                    digits = digits if digits >= 0 else 0
+                    scale = 10 ** digits
+                    return math.copysign(math.floor(abs(val) * scale + 0.5) / scale, val)
+                if name == "sqrt":
+                    return math.sqrt(val)
                 fn = getattr(math, name)
                 return fn(val)
             if name == "pow":
@@ -232,22 +283,43 @@ class Interpreter:
             import json
             return json.dumps(obj)
 
-        def builtin_read(filename):
+        def builtin_file_read(filename):
             """Read file contents and return as string"""
             try:
                 with open(filename, 'r') as f:
                     return f.read()
+            except FileNotFoundError:
+                return ""
             except Exception as e:
                 raise Exception(f"Error reading file '{filename}': {e}")
 
-        def builtin_write(content, filename):
+        def builtin_file_write(content, filename):
             """Write string content to file"""
             try:
                 with open(filename, 'w') as f:
                     f.write(str(content))
-                return None
+                return 1
             except Exception as e:
                 raise Exception(f"Error writing to file '{filename}': {e}")
+
+        def builtin_file_append(content, filename):
+            try:
+                with open(filename, 'a') as f:
+                    f.write(str(content))
+                return 1
+            except Exception as e:
+                raise Exception(f"Error appending to file '{filename}': {e}")
+
+        def builtin_file_size(filename):
+            import os
+            try:
+                return os.path.getsize(filename)
+            except OSError:
+                return 0
+
+        def builtin_file_exist(filename):
+            import os
+            return os.path.exists(filename)
 
         def builtin_regexp_match(pattern, text):
             """Check if pattern matches text"""
@@ -311,6 +383,19 @@ class Interpreter:
         self.global_env.define('str', builtin_str)
         self.global_env.define('bool', builtin_bool)
         self.global_env.define('type', builtin_type)
+        import math as _math, random as _random, builtins as _builtins
+        self.global_env.define('sin', lambda x: _math.sin(float(x)))
+        self.global_env.define('cos', lambda x: _math.cos(float(x)))
+        self.global_env.define('asin', lambda x: _math.asin(float(x)))
+        self.global_env.define('acos', lambda x: _math.acos(float(x)))
+        self.global_env.define('log', lambda x: _math.log(float(x)))
+        self.global_env.define('exp', lambda x: _math.exp(float(x)))
+        self.global_env.define('ceil', lambda x: _math.ceil(float(x)))
+        self.global_env.define('floor', lambda x: _math.floor(float(x)))
+        self.global_env.define('sqrt', lambda x: _math.sqrt(float(x)))
+        self.global_env.define('round', lambda x, d=0: _math.copysign(_math.floor(abs(float(x)) * (10 ** max(int(d), 0)) + 0.5) / (10 ** max(int(d), 0)), float(x)))
+        self.global_env.define('pow', lambda x, y: _math.pow(float(x), float(y)))
+        self.global_env.define('random', lambda *args: (_random.random() if len(args)==0 else (_random.uniform(float(args[0]), float(args[1])) if len(args)==2 else (_ for _ in ()).throw(Exception("random() takes 0 or 2 arguments")))))
         self.global_env.define('input', builtin_input)
         self.global_env.define('range', builtin_range)
         self.global_env.define('append', builtin_append)
@@ -321,13 +406,20 @@ class Interpreter:
         self.global_env.define('math', builtin_math)
         self.global_env.define('json_encode', builtin_json_encode)
         self.global_env.define('json_decode', builtin_json_decode)
-        self.global_env.define('read', builtin_read)
-        self.global_env.define('write', builtin_write)
+        self.global_env.define('file_read', builtin_file_read)
+        self.global_env.define('file_write', builtin_file_write)
+        self.global_env.define('file_append', builtin_file_append)
+        self.global_env.define('file_size', builtin_file_size)
+        self.global_env.define('file_exist', builtin_file_exist)
+        self.global_env.define('read', builtin_file_read)
+        self.global_env.define('write', builtin_file_write)
         self.global_env.define('regexp_match', builtin_regexp_match)
         self.global_env.define('regexp_find', builtin_regexp_find)
         self.global_env.define('regexp_replace', builtin_regexp_replace)
         self.global_env.define('str_split', builtin_str_split)
         self.global_env.define('str_join', builtin_str_join)
+        self.global_env.define('str_trim', builtin_str_trim)
+        self.global_env.define('str_format', builtin_str_format)
         self.global_env.define('cmd_args', builtin_cmd_args)
 
     def is_internal_access(self, instance: ClassInstance) -> bool:
@@ -449,6 +541,8 @@ class Interpreter:
     def eval_statement(self, node: ASTNode) -> Any:
         if isinstance(node, VarDeclaration):
             # 变量定义
+            if self.current_env.exists_current(node.name):
+                raise Exception(f"Redefinition of '{node.name}' in the same scope")
             value = self.eval_expression(node.value)
             self.current_env.define(node.name, value)
 
@@ -510,6 +604,30 @@ class Interpreter:
                 except ContinueException:
                     continue
 
+        elif isinstance(node, ForStatement):
+            start = int(self.eval_expression(node.start))
+            end = int(self.eval_expression(node.end))
+            step = 1 if start <= end else -1
+            try:
+                cur = start
+                while True:
+                    if (step > 0 and cur > end) or (step < 0 and cur < end):
+                        break
+                    try:
+                        prev = self.current_env
+                        iter_env = Environment(prev)
+                        iter_env.define(node.index_var, cur)
+                        self.current_env = iter_env
+                        for stmt in node.body:
+                            self.eval_statement(stmt)
+                    except ContinueException:
+                        pass
+                    finally:
+                        self.current_env = prev
+                    cur += step
+            except BreakException:
+                pass
+
         elif isinstance(node, ForeachStatement):
             # foreach 循环: 遍历数组或字典
             collection = self.eval_expression(node.collection)
@@ -554,17 +672,14 @@ class Interpreter:
                 raise RuntimeError(f"Cannot iterate over {type(collection)}")
 
         elif isinstance(node, TryCatch):
+            prev_env = self.current_env
             try:
                 for stmt in node.try_block:
                     self.eval_statement(stmt)
             except TinyException as ex:
-                prev_env = self.current_env
-                catch_env = Environment(prev_env)
-                catch_env.define(node.catch_var, ex.message)
-                self.current_env = catch_env
+                prev_env.set_or_define(node.catch_var, ex.message)
                 for stmt in node.catch_block:
                     self.eval_statement(stmt)
-                self.current_env = prev_env
 
         elif isinstance(node, Raise):
             msg_val = self.eval_expression(node.expr)
@@ -736,18 +851,33 @@ class Interpreter:
             raise Exception(f"Unknown expression type: {type(node)}")
 
     def eval_binary_op(self, left: Any, op: str, right: Any) -> Any:
+        def is_number(v):
+            return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+        def require_numeric(name):
+            if not (is_number(left) and is_number(right)):
+                raise Exception(f"Type error: {name} requires numbers")
+
         if op == '+':
+            if isinstance(left, list) and isinstance(right, list):
+                return left + right
             if isinstance(left, str) or isinstance(right, str):
-                return str(left) + str(right)
+                if not (isinstance(left, str) and isinstance(right, str)):
+                    raise Exception("Type error: string concatenation requires two strings")
+                return left + right
+            require_numeric("addition")
             return left + right
 
         elif op == '-':
+            require_numeric("subtraction")
             return left - right
 
         elif op == '*':
+            require_numeric("multiplication")
             return left * right
 
         elif op == '/':
+            require_numeric("division")
             if right == 0:
                 raise Exception("Division by zero")
             if isinstance(left, int) and isinstance(right, int):
@@ -755,27 +885,60 @@ class Interpreter:
             return left / right
 
         elif op == '%':
+            require_numeric("modulo")
             if right == 0:
                 raise Exception("Modulo by zero")
             return left % right
 
         elif op == '==':
-            return left == right
+            if is_number(left) and is_number(right):
+                return float(left) == float(right)
+            if type(left) is type(right):
+                return left == right
+            return False
 
         elif op == '!=':
-            return left != right
+            if is_number(left) and is_number(right):
+                return float(left) != float(right)
+            if type(left) is type(right):
+                return left != right
+            return True
 
         elif op == '<':
-            return left < right
+            if is_number(left) and is_number(right):
+                return left < right
+            if type(left) is bool and type(right) is bool:
+                return left < right
+            if isinstance(left, str) and isinstance(right, str):
+                return left < right
+            raise Exception("Type error: '<' requires numbers, bools, or strings of same type")
 
         elif op == '<=':
-            return left <= right
+            if is_number(left) and is_number(right):
+                return left <= right
+            if type(left) is bool and type(right) is bool:
+                return left <= right
+            if isinstance(left, str) and isinstance(right, str):
+                return left <= right
+            raise Exception("Type error: '<=' requires numbers, bools, or strings of same type")
 
         elif op == '>':
-            return left > right
+            if is_number(left) and is_number(right):
+                return left > right
+            if type(left) is bool and type(right) is bool:
+                return left > right
+            if isinstance(left, str) and isinstance(right, str):
+                return left > right
+            raise Exception("Type error: '>' requires numbers, bools, or strings of same type")
 
         elif op == '>=':
-            return left >= right
+            if is_number(left) and is_number(right):
+                return left >= right
+            if type(left) is bool and type(right) is bool:
+                return left >= right
+            if isinstance(left, str) and isinstance(right, str):
+                return left >= right
+            raise Exception("Type error: '>=' requires numbers, bools, or strings of same type")
 
         elif op == 'and':
             return self.is_truthy(left) and self.is_truthy(right)
@@ -794,6 +957,19 @@ class Interpreter:
                 if not isinstance(left, str):
                     raise Exception("Substring for 'in' must be a string")
                 return left in right
+            else:
+                raise Exception(f"'in' not supported for {type(right)}")
+        elif op == 'not_in':
+            if isinstance(right, list):
+                return not any(left == elem for elem in right)
+            elif isinstance(right, dict):
+                if not isinstance(left, str):
+                    raise Exception("Dictionary keys for 'in' must be strings")
+                return left not in right
+            elif isinstance(right, str):
+                if not isinstance(left, str):
+                    raise Exception("Substring for 'in' must be a string")
+                return left not in right
             else:
                 raise Exception(f"'in' not supported for {type(right)}")
 

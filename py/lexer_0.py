@@ -32,8 +32,10 @@ class TokenType(Enum):
     THEN = auto()
     ELSE = auto()
     WHILE = auto()
+    FOR = auto()
     FOREACH = auto()
     IN = auto()
+    NOT_IN = auto()
     BREAK = auto()
     CONTINUE = auto()
     CLASS = auto()
@@ -76,6 +78,7 @@ class TokenType(Enum):
     COLON = auto()
     SEMICOLON = auto()
     DOT = auto()
+    DOTDOT = auto()
 
     # Special
     EOF = auto()
@@ -107,8 +110,10 @@ class Lexer:
             'then': TokenType.THEN,
             'else': TokenType.ELSE,
             'while': TokenType.WHILE,
+            'for': TokenType.FOR,
             'foreach': TokenType.FOREACH,
             'in': TokenType.IN,
+            'not_in': TokenType.NOT_IN,
             'break': TokenType.BREAK,
             'continue': TokenType.CONTINUE,
             'class': TokenType.CLASS,
@@ -189,8 +194,22 @@ class Lexer:
         start_column = self.column
         quote = self.advance()  # Skip opening quote
         string_val = ''
+        triple = self.peek() == quote and self.peek(1) == quote
+        if triple:
+            self.advance(); self.advance()  # consume the other two
 
-        while self.peek() and self.peek() != quote:
+        while True:
+            if self.peek() is None:
+                self.error("Unterminated string")
+            if triple:
+                if self.peek() == quote and self.peek(1) == quote and self.peek(2) == quote:
+                    self.advance(); self.advance(); self.advance()
+                    break
+            else:
+                if self.peek() == quote:
+                    self.advance()
+                    break
+
             if self.peek() == '\\':
                 self.advance()
                 next_char = self.advance()
@@ -207,10 +226,6 @@ class Lexer:
             else:
                 string_val += self.advance()
 
-        if not self.peek():
-            self.error("Unterminated string")
-
-        self.advance()  # Skip closing quote
         return Token(TokenType.STRING, string_val, start_line, start_column)
 
     def read_identifier(self) -> Token:
@@ -364,7 +379,11 @@ class Lexer:
 
             elif char == '.':
                 self.advance()
-                self.tokens.append(Token(TokenType.DOT, None, start_line, start_column))
+                if self.peek() == '.':
+                    self.advance()
+                    self.tokens.append(Token(TokenType.DOTDOT, None, start_line, start_column))
+                else:
+                    self.tokens.append(Token(TokenType.DOT, None, start_line, start_column))
 
             else:
                 self.error(f"Unexpected character: {char}")

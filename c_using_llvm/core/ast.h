@@ -22,6 +22,7 @@ typedef enum {
     NODE_IF_STMT,
     NODE_WHILE_STMT,
     NODE_FOREACH_STMT,
+    NODE_FOR_STMT,
     NODE_BREAK,
     NODE_CONTINUE,
     NODE_ARRAY_LITERAL,
@@ -38,7 +39,7 @@ typedef enum {
 typedef enum {
     OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_MOD,
     OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE,
-    OP_AND, OP_OR, OP_NOT, OP_NEG, OP_IN
+    OP_AND, OP_OR, OP_NOT, OP_NEG, OP_IN, OP_NOT_IN
 } Operator;
 
 typedef struct ASTNode ASTNode;
@@ -124,6 +125,13 @@ struct ASTNode {
             ASTNode *condition;
             ASTNodeList *body;
         } while_stmt;
+
+        struct {
+            char *index_var;
+            ASTNode *start;
+            ASTNode *end;
+            ASTNodeList *body;
+        } for_stmt;
 
         struct {
             char *key_var;
@@ -216,6 +224,7 @@ ASTNode *create_func_call(char *name, ASTNodeList *arguments);
 ASTNode *create_return(ASTNode *value);
 ASTNode *create_if_stmt(ASTNode *condition, ASTNodeList *then_block, ASTNodeList *else_block);
 ASTNode *create_while_stmt(ASTNode *condition, ASTNodeList *body);
+ASTNode *create_for_stmt(char *index_var, ASTNode *start, ASTNode *end, ASTNodeList *body);
 ASTNode *create_foreach_stmt(char *key_var, char *value_var, ASTNode *collection, ASTNodeList *body);
 ASTNode *create_break();
 ASTNode *create_continue();

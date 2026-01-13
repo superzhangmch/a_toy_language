@@ -2,7 +2,7 @@
 
 包含三个编译器：
 - C 解释器
-- C 转译编译器: AST => C code => gcc 编译得到 bin
+- C 转译编译器: AST => C code => gcc 编译得到 bin (这个不支持所有功能)
 - LLVM 后端编译器: AST => LLVM IR => llvm 编译得到 bin
 
 (补充说明: 所以三个, 是因为让 AI 直接生成可编译成 binary 的, 它居然给包了个 gcc 实现; 后来只好让它弄了个 llvm 的)

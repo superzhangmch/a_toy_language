@@ -189,6 +189,15 @@ ASTNode *create_while_stmt(ASTNode *condition, ASTNodeList *body) {
     return node;
 }
 
+ASTNode *create_for_stmt(char *index_var, ASTNode *start, ASTNode *end, ASTNodeList *body) {
+    ASTNode *node = create_node(NODE_FOR_STMT);
+    node->data.for_stmt.index_var = strdup(index_var);
+    node->data.for_stmt.start = start;
+    node->data.for_stmt.end = end;
+    node->data.for_stmt.body = body;
+    return node;
+}
+
 ASTNode *create_foreach_stmt(char *key_var, char *value_var, ASTNode *collection, ASTNodeList *body) {
     ASTNode *node = create_node(NODE_FOREACH_STMT);
     node->data.foreach_stmt.key_var = strdup(key_var);

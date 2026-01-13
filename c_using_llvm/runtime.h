@@ -14,6 +14,7 @@
 #define TYPE_CLASS 5
 #define TYPE_INSTANCE 6
 #define TYPE_NULL 7
+#define TYPE_BOOL 8
 
 // Value structure matching LLVM IR
 typedef struct {
@@ -41,8 +42,11 @@ Value make_null(void);
 Value type(Value v);
 Value slice_access(Value obj, Value start_v, Value end_v);
 Value input(Value prompt);
-Value read(Value filename);
-Value write(Value content, Value filename);
+Value file_read(Value filename);
+Value file_write(Value content, Value filename);
+Value file_append(Value content, Value filename);
+Value file_size(Value filename);
+Value file_exist(Value filename);
 
 // Dict functions
 Value make_dict(void);
@@ -53,10 +57,11 @@ Value dict_keys(Value dict);
 Value keys(Value dict);  // Alias for dict_keys (matches builtin name)
 
 // IN operator (element in array, key in dict, substring in string)
-Value in_operator(Value left, Value right);
+Value in_operator(Value left, Value right, int line, const char *file);
+Value not_in_operator(Value left, Value right, int line, const char *file);
 
 // Binary operations (handles all types including string concatenation)
-Value binary_op(Value left, int op, Value right);
+Value binary_op(Value left, int op, Value right, int line, const char *file);
 
 // Regular expression functions
 Value regexp_match(Value pattern, Value str);
@@ -66,11 +71,28 @@ Value regexp_replace(Value pattern, Value str, Value replacement);
 // String functions
 Value str_split(Value str, Value separator);
 Value str_join(Value arr, Value separator);
+Value str_trim(Value str, Value chars);
+Value str_format(Value fmt, Value *args, int arg_count);
+void set_source_ctx(int line, const char *file);
+
+// Math functions
+Value math_sin(Value a);
+Value math_cos(Value a);
+Value math_asin(Value a);
+Value math_acos(Value a);
+Value math_log(Value a);
+Value math_exp(Value a);
+Value math_ceil(Value a);
+Value math_floor(Value a);
+Value math_round(Value a);
+Value math_pow_val(Value a, Value b);
+Value math_random_val(Value a, Value b, int arg_count);
+Value math_sqrt(Value a);
 
 // JSON helpers
 Value json_encode(Value json_str);
-Value json_decode(Value v);
 Value json_decode_ctx(Value v, int line, char *file);
+Value json_decode(Value v);
 
 // Exception helpers
 void* __try_push_buf(void);
@@ -83,7 +105,6 @@ void print_value(Value v);
 
 // Misc helpers
 Value remove_entry(Value obj, Value key_or_index);
-Value math_fn(Value op, Value a, Value b, int arg_count);
 
 // Class/object runtime
 Value make_class(char *name);

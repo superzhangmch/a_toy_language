@@ -9,6 +9,7 @@ extern FILE *yyin;
 extern ASTNode *root;
 extern PreprocessResult g_pp_result;
 extern int yylineno;
+extern int yylex(void);
 typedef void* YY_BUFFER_STATE;
 extern YY_BUFFER_STATE yy_scan_string(const char *yy_str);
 extern void yy_delete_buffer(YY_BUFFER_STATE b);

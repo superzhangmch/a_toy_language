@@ -24,19 +24,19 @@ PreprocessResult g_pp_result;
 %token <bval> TRUE FALSE
 %token NULL_LITERAL
 
-%token VAR FUNC RETURN IF ELSE WHILE FOREACH IN BREAK CONTINUE CLASS NEW
+%token VAR FUNC RETURN IF ELSE WHILE FOR FOREACH IN NOT_IN BREAK CONTINUE CLASS NEW
 %token TRY CATCH RAISE ASSERT
 %token AND OR NOT
 %token PLUS MINUS MULTIPLY DIVIDE MODULO
 %token EQ NE LT LE GT GE
-%token ASSIGN PLUS_ASSIGN MINUS_ASSIGN MULTIPLY_ASSIGN DIVIDE_ASSIGN ARROW DOT
+%token ASSIGN PLUS_ASSIGN MINUS_ASSIGN MULTIPLY_ASSIGN DIVIDE_ASSIGN ARROW DOT DOTDOT
 %token LPAREN RPAREN LBRACE RBRACE LBRACKET RBRACKET
 %token COMMA COLON SEMICOLON
 
 %type <node> program statement expression primary_expr postfix_expr
 %type <node> unary_expr multiplicative_expr additive_expr comparison_expr
 %type <node> equality_expr logical_and_expr logical_or_expr
-%type <node> var_decl func_def return_stmt if_stmt while_stmt foreach_stmt class_def
+%type <node> var_decl func_def return_stmt if_stmt while_stmt foreach_stmt for_stmt class_def
 %type <node> assignment array_literal dict_literal
 %type <list> statement_list expr_list param_list array_expr_list dict_pair_list_opt
 %type <class_parts> class_member_list
@@ -44,7 +44,7 @@ PreprocessResult g_pp_result;
 %left OR
 %left AND
 %left EQ NE
-%left LT LE GT GE
+%left LT LE GT GE IN NOT_IN
 %left PLUS MINUS
 %left MULTIPLY DIVIDE MODULO
 %right NOT
@@ -84,6 +84,7 @@ statement:
     | if_stmt
     | while_stmt
     | foreach_stmt
+    | for_stmt
     | class_def
     | TRY LBRACE statement_list RBRACE CATCH IDENTIFIER LBRACE statement_list RBRACE {
         $$ = create_try_catch($3, $6, $8);
@@ -187,9 +188,20 @@ while_stmt:
     ;
 
 foreach_stmt:
-    FOREACH LPAREN IDENTIFIER ARROW IDENTIFIER IN expression RPAREN LBRACE statement_list RBRACE {
+        FOREACH LPAREN IDENTIFIER ARROW IDENTIFIER IN expression RPAREN LBRACE statement_list RBRACE {
         $$ = create_foreach_stmt($3, $5, $7, $10);
     }
+    ;
+
+for_stmt:
+    FOR LPAREN IDENTIFIER ASSIGN expression range_op expression RPAREN LBRACE statement_list RBRACE {
+        $$ = create_for_stmt($3, $5, $7, $10);
+    }
+    ;
+
+range_op:
+    DOTDOT
+    | DOT DOT
     ;
 
 assignment:
@@ -262,6 +274,9 @@ comparison_expr:
     }
     | additive_expr IN additive_expr {
         $$ = create_binary_op($1, OP_IN, $3);
+    }
+    | additive_expr NOT_IN additive_expr {
+        $$ = create_binary_op($1, OP_NOT_IN, $3);
     }
     ;
 

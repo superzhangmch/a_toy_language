@@ -75,6 +75,8 @@ class Parser:
             return self.parse_if_statement()  # If statements don't have semicolons
         elif token.type == TokenType.WHILE:
             return self.parse_while_statement()  # While loops don't have semicolons
+        elif token.type == TokenType.FOR:
+            return self.parse_for_statement()
         elif token.type == TokenType.FOREACH:
             return self.parse_foreach_statement()  # Foreach loops don't have semicolons
         elif token.type == TokenType.CLASS:
@@ -293,6 +295,39 @@ class Parser:
         self.expect(TokenType.RBRACE)              # }
         return WhileStatement(condition, body)
 
+    def parse_for_statement(self):
+        """
+        for (idx = st .. end) {...}
+        """
+        from ast_nodes_2 import ForStatement
+
+        self.expect(TokenType.FOR)
+        self.expect(TokenType.LPAREN)
+        idx_tok = self.current_token()
+        if idx_tok.type != TokenType.IDENTIFIER:
+            self.error("for() needs index identifier")
+        idx = idx_tok.value
+        self.advance()
+        self.expect(TokenType.ASSIGN)
+        start = self.parse_expression()
+        if self.current_token().type == TokenType.DOTDOT:
+            self.advance()
+        elif self.current_token().type == TokenType.DOT and self.peek_token().type == TokenType.DOT:
+            self.advance()
+            self.advance()
+        else:
+            self.error("expected '..' in for range")
+        end = self.parse_expression()
+        self.expect(TokenType.RPAREN)
+        self.expect(TokenType.LBRACE)
+        body = []
+        while self.current_token().type != TokenType.RBRACE:
+            stmt = self.parse_statement()
+            if stmt:
+                body.append(stmt)
+        self.expect(TokenType.RBRACE)
+        return ForStatement(idx, start, end, body)
+
     def parse_foreach_statement(self) -> 'ForeachStatement':
         """
         foreach(key_var => value_var in collection) {...}
@@ -373,10 +408,12 @@ class Parser:
     def parse_comparison(self) -> ASTNode:
         left = self.parse_additive()
 
-        while self.current_token().type in [TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE, TokenType.IN]:
+        while self.current_token().type in [TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE, TokenType.IN, TokenType.NOT_IN]:
             op_token = self.advance()
             if op_token.type == TokenType.IN:
                 op = 'in'
+            elif op_token.type == TokenType.NOT_IN:
+                op = 'not_in'
             else:
                 op_map = {
                     TokenType.LT: '<',

@@ -26,12 +26,14 @@ extern int yylineno;
 "if"                    { return IF; }
 "else"                  { return ELSE; }
 "while"                 { return WHILE; }
+"for"                   { return FOR; }
 "foreach"               { return FOREACH; }
 "in"                    { return IN; }
 "break"                 { return BREAK; }
 "continue"              { return CONTINUE; }
 "class"                 { return CLASS; }
 "new"                   { return NEW; }
+"not_in"                { return NOT_IN; }
 "try"                   { return TRY; }
 "catch"                 { return CATCH; }
 "raise"                 { return RAISE; }
@@ -151,6 +153,7 @@ extern int yylineno;
 "-="                    { return MINUS_ASSIGN; }
 "*="                    { return MULTIPLY_ASSIGN; }
 "/="                    { return DIVIDE_ASSIGN; }
+\.\.                    { return DOTDOT; }
 
 "+"                     { return PLUS; }
 "-"                     { return MINUS; }

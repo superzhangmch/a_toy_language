@@ -5,6 +5,8 @@
 #include <regex.h>
 #include <ctype.h>
 #include <math.h>
+#include <stdarg.h>
+#include "type_check_common.h"
 #include "interpreter.h"
 #include "ast.h"
 
@@ -24,6 +26,8 @@ static Environment *loop_env_stack[256];
 static int loop_env_top = 0;
 static ClassInstance *this_stack[256];
 static int this_stack_top = 0;
+static int err_line = -1;
+static const char *err_file = NULL;
 
 // Global storage for command line arguments
 static int g_argc = 0;
@@ -36,6 +40,20 @@ static void setup_builtins();
 static Value *instantiate_class(ClassValue *cls, Value **args, int arg_count);
 static Value *call_method(Value *instance_val, const char *name, Value **args, int arg_count);
 static void execute_block(ASTNodeList *stmts);
+static void set_error_ctx(int line, const char *file) {
+    err_line = line;
+    err_file = file ? file : "<input>";
+}
+
+static __attribute__((noreturn)) void type_errorf(const char *fmt, ...) {
+    fprintf(stderr, "Error at %s:%d: ", err_file ? err_file : "<input>", err_line >= 0 ? err_line : 0);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+    exit(1);
+}
 
 /* Hash function */
 static unsigned int hash(const char *str) {
@@ -248,13 +266,47 @@ Environment *create_environment(Environment *parent) {
 }
 
 void env_define(Environment *env, char *name, Value *val) {
+    // Disallow redefinition in the same scope
     unsigned int idx = hash(name);
+    EnvEntry *cur = env->buckets[idx];
+    while (cur != NULL) {
+        if (strcmp(cur->name, name) == 0) {
+            type_errorf("Redefinition of '%s' in the same scope", name);
+        }
+        cur = cur->next;
+    }
+
     EnvEntry *entry = malloc(sizeof(EnvEntry));
     entry->name = strdup(name);
     entry->value = val;
     entry->next = env->buckets[idx];
     env->buckets[idx] = entry;
     env->size++;
+}
+
+// Set if exists in current scope, otherwise define
+void env_set_or_define(Environment *env, char *name, Value *val) {
+    unsigned int idx = hash(name);
+    EnvEntry *cur = env->buckets[idx];
+    while (cur != NULL) {
+        if (strcmp(cur->name, name) == 0) {
+            cur->value = val;
+            return;
+        }
+        cur = cur->next;
+    }
+    env_define(env, name, val);
+}
+
+// Check if name exists only in current scope
+static int env_exists_current(Environment *env, const char *name) {
+    unsigned int idx = hash(name);
+    EnvEntry *cur = env->buckets[idx];
+    while (cur != NULL) {
+        if (strcmp(cur->name, name) == 0) return 1;
+        cur = cur->next;
+    }
+    return 0;
 }
 
 Value *env_get(Environment *env, char *name) {
@@ -272,8 +324,7 @@ Value *env_get(Environment *env, char *name) {
         return env_get(env->parent, name);
     }
 
-    fprintf(stderr, "Undefined variable: %s\n", name);
-    exit(1);
+    type_errorf("Undefined variable: %s", name);
 }
 
 void env_set(Environment *env, char *name, Value *val) {
@@ -509,8 +560,7 @@ static Value *builtin_println(Value **args, int arg_count) {
 
 static Value *builtin_len(Value **args, int arg_count) {
     if (arg_count != 1) {
-        fprintf(stderr, "len() takes exactly 1 argument\n");
-        exit(1);
+        type_errorf("len() takes exactly 1 argument");
     }
     Value *v = args[0];
     if (v->type == VAL_STRING) {
@@ -520,33 +570,152 @@ static Value *builtin_len(Value **args, int arg_count) {
     } else if (v->type == VAL_DICT) {
         return create_int_value(v->data.dict_val->size);
     }
-    fprintf(stderr, "len() not supported for this type\n");
-    exit(1);
+    type_errorf("len() not supported for this type");
 }
 
 static Value *builtin_int(Value **args, int arg_count) {
     if (arg_count != 1) {
-        fprintf(stderr, "int() takes exactly 1 argument\n");
-        exit(1);
+        type_errorf("int() takes exactly 1 argument");
     }
     Value *v = args[0];
     if (v->type == VAL_INT) return v;
     if (v->type == VAL_FLOAT) return create_int_value((int)v->data.float_val);
     if (v->type == VAL_STRING) return create_int_value(atoi(v->data.string_val));
     if (v->type == VAL_BOOL) return create_int_value(v->data.bool_val);
-    return create_int_value(0);
+    type_errorf("int() requires int/float/string/bool");
 }
 
 static Value *builtin_float(Value **args, int arg_count) {
     if (arg_count != 1) {
-        fprintf(stderr, "float() takes exactly 1 argument\n");
-        exit(1);
+        type_errorf("float() takes exactly 1 argument");
     }
     Value *v = args[0];
     if (v->type == VAL_FLOAT) return v;
     if (v->type == VAL_INT) return create_float_value((double)v->data.int_val);
     if (v->type == VAL_STRING) return create_float_value(atof(v->data.string_val));
-    return create_float_value(0.0);
+    if (v->type == VAL_BOOL) return create_float_value(v->data.bool_val ? 1.0 : 0.0);
+    type_errorf("float() requires int/float/string/bool");
+}
+
+static double value_to_double_interp(Value *v) {
+    switch (v->type) {
+        case VAL_INT: return v->data.int_val;
+        case VAL_FLOAT: return v->data.float_val;
+        case VAL_BOOL: return v->data.bool_val ? 1.0 : 0.0;
+        case VAL_STRING: return atof(v->data.string_val);
+        default:
+            type_errorf("Math functions require numeric/string convertible types");
+    }
+}
+
+static Value *builtin_sin(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "sin() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(sin(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_cos(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "cos() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(cos(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_asin(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "asin() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(asin(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_acos(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "acos() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(acos(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_log(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "log() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(log(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_sqrt(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "sqrt() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(sqrt(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_exp(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "exp() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(exp(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_ceil(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "ceil() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(ceil(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_floor(Value **args, int arg_count) {
+    if (arg_count != 1) {
+        fprintf(stderr, "floor() takes exactly 1 argument\n");
+        exit(1);
+    }
+    return create_float_value(floor(value_to_double_interp(args[0])));
+}
+
+static Value *builtin_round_val(Value **args, int arg_count) {
+    if (arg_count != 1 && arg_count != 2) {
+        fprintf(stderr, "round() takes 1 or 2 arguments\n");
+        exit(1);
+    }
+    double val = value_to_double_interp(args[0]);
+    int digits = 0;
+    if (arg_count == 2) {
+        digits = (int)value_to_double_interp(args[1]);
+        if (digits < 0) digits = 0;
+    }
+    double scale = pow(10.0, digits);
+    double res = round(val * scale) / scale;
+    return create_float_value(res);
+}
+
+static Value *builtin_pow_val(Value **args, int arg_count) {
+    if (arg_count != 2) {
+        fprintf(stderr, "pow() takes exactly 2 arguments\n");
+        exit(1);
+    }
+    return create_float_value(pow(value_to_double_interp(args[0]), value_to_double_interp(args[1])));
+}
+
+static Value *builtin_random_val(Value **args, int arg_count) {
+    double r = (double)rand() / (double)RAND_MAX;
+    if (arg_count == 0) {
+        return create_float_value(r);
+    } else if (arg_count == 2) {
+        double min = value_to_double_interp(args[0]);
+        double max = value_to_double_interp(args[1]);
+        return create_float_value(min + r * (max - min));
+    } else {
+        fprintf(stderr, "random() takes 0 or 2 arguments\n");
+        exit(1);
+    }
 }
 
 static Value *builtin_str(Value **args, int arg_count) {
@@ -567,6 +736,9 @@ static Value *builtin_str(Value **args, int arg_count) {
     }
     if (v->type == VAL_BOOL) {
         return create_string_value(v->data.bool_val ? "true" : "false");
+    }
+    if (v->type == VAL_NULL) {
+        return create_string_value("null");
     }
     return create_string_value("");
 }
@@ -599,7 +771,12 @@ static Value *builtin_type(Value **args, int arg_count) {
         case VAL_DICT: return create_string_value("dict");
         case VAL_FUNC: return create_string_value("function");
         case VAL_CLASS: return create_string_value("class");
-        case VAL_INSTANCE: return create_string_value("instance");
+        case VAL_INSTANCE: {
+            if (v->data.instance_val && v->data.instance_val->class_val) {
+                return create_string_value(v->data.instance_val->class_val->name);
+            }
+            return create_string_value("instance");
+        }
         case VAL_NULL: return create_string_value("null");
         default: return create_string_value("unknown");
     }
@@ -687,6 +864,7 @@ static Value *builtin_math(Value **args, int arg_count) {
         strcmp(name, "asin") == 0 || strcmp(name, "acos") == 0 ||
         strcmp(name, "log") == 0 || strcmp(name, "exp") == 0 ||
         strcmp(name, "ceil") == 0 || strcmp(name, "floor") == 0 ||
+        strcmp(name, "sqrt") == 0 ||
         strcmp(name, "round") == 0) {
         if (arg_count != 2) {
             fprintf(stderr, "math(%s) requires 1 argument\n", name);
@@ -702,6 +880,7 @@ static Value *builtin_math(Value **args, int arg_count) {
         else if (strcmp(name, "exp") == 0) res = exp(val);
         else if (strcmp(name, "ceil") == 0) res = ceil(val);
         else if (strcmp(name, "floor") == 0) res = floor(val);
+        else if (strcmp(name, "sqrt") == 0) res = sqrt(val);
         else res = round(val);
         return create_float_value(res);
     }
@@ -771,7 +950,11 @@ static Value *parse_json_string(const char **p) {
         if (idx >= 4095) break;
     }
     buffer[idx] = '\0';
-    if (**p == quote) (*p)++; // consume closing
+    if (**p == quote) {
+        (*p)++; // consume closing
+    } else {
+        json_error = 1; // unterminated string
+    }
     return create_string_value(buffer);
 }
 
@@ -904,7 +1087,7 @@ static void json_serialize_value(Value *v, char **buf, int *len, int *cap) {
             break;
         }
         case VAL_FLOAT: {
-            char tmp[64]; sprintf(tmp, "%g", v->data.float_val);
+            char tmp[64]; sprintf(tmp, "%.3g", v->data.float_val);
             sb_append(buf, len, cap, tmp);
             break;
         }
@@ -996,19 +1179,17 @@ static Value *builtin_input(Value **args, int arg_count) {
     return create_string_value("");
 }
 
-static Value *builtin_read(Value **args, int arg_count) {
+static Value *builtin_file_read(Value **args, int arg_count) {
     if (arg_count != 1 || args[0]->type != VAL_STRING) {
-        fprintf(stderr, "read() requires a filename string\n");
+        fprintf(stderr, "file_read() requires a filename string\n");
         exit(1);
     }
 
     FILE *fp = fopen(args[0]->data.string_val, "r");
     if (fp == NULL) {
-        fprintf(stderr, "Error opening file: %s\n", args[0]->data.string_val);
-        exit(1);
+        return create_string_value("");
     }
 
-    // Read entire file
     fseek(fp, 0, SEEK_END);
     long fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
@@ -1021,25 +1202,7 @@ static Value *builtin_read(Value **args, int arg_count) {
     return create_string_value(content);
 }
 
-static Value *builtin_write(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "write() requires content and filename\n");
-        exit(1);
-    }
-
-    Value *content = args[0];
-    if (args[1]->type != VAL_STRING) {
-        fprintf(stderr, "write() filename must be a string\n");
-        exit(1);
-    }
-
-    FILE *fp = fopen(args[1]->data.string_val, "w");
-    if (fp == NULL) {
-        fprintf(stderr, "Error writing to file: %s\n", args[1]->data.string_val);
-        exit(1);
-    }
-
-    // Convert content to string if needed
+static void write_content(FILE *fp, Value *content) {
     if (content->type == VAL_STRING) {
         fprintf(fp, "%s", content->data.string_val);
     } else if (content->type == VAL_INT) {
@@ -1049,9 +1212,63 @@ static Value *builtin_write(Value **args, int arg_count) {
     } else {
         fprintf(fp, "%s", content->data.bool_val ? "true" : "false");
     }
+}
 
+static Value *builtin_file_write(Value **args, int arg_count) {
+    if (arg_count != 2) {
+        fprintf(stderr, "file_write() requires content and filename\n");
+        exit(1);
+    }
+    if (args[1]->type != VAL_STRING) {
+        fprintf(stderr, "file_write() filename must be a string\n");
+        exit(1);
+    }
+
+    FILE *fp = fopen(args[1]->data.string_val, "w");
+    if (fp == NULL) {
+        return create_int_value(0);
+    }
+    write_content(fp, args[0]);
     fclose(fp);
-    return create_null_value();
+    return create_int_value(1);
+}
+
+static Value *builtin_file_append(Value **args, int arg_count) {
+    if (arg_count != 2 || args[1]->type != VAL_STRING) {
+        fprintf(stderr, "file_append() requires content and filename\n");
+        exit(1);
+    }
+    FILE *fp = fopen(args[1]->data.string_val, "a");
+    if (fp == NULL) {
+        return create_int_value(0);
+    }
+    write_content(fp, args[0]);
+    fclose(fp);
+    return create_int_value(1);
+}
+
+static Value *builtin_file_size(Value **args, int arg_count) {
+    if (arg_count != 1 || args[0]->type != VAL_STRING) {
+        fprintf(stderr, "file_size() requires a filename\n");
+        exit(1);
+    }
+    FILE *fp = fopen(args[0]->data.string_val, "rb");
+    if (fp == NULL) return create_int_value(0);
+    fseek(fp, 0, SEEK_END);
+    long sz = ftell(fp);
+    fclose(fp);
+    return create_int_value((int)sz);
+}
+
+static Value *builtin_file_exist(Value **args, int arg_count) {
+    if (arg_count != 1 || args[0]->type != VAL_STRING) {
+        fprintf(stderr, "file_exist() requires a filename\n");
+        exit(1);
+    }
+    FILE *fp = fopen(args[0]->data.string_val, "rb");
+    if (fp == NULL) return create_bool_value(0);
+    fclose(fp);
+    return create_bool_value(1);
 }
 
 
@@ -1166,47 +1383,76 @@ static Value *builtin_regexp_replace(Value **args, int arg_count) {
         return create_string_value(strdup(str));
     }
 
-    // Build result string
-    char *result_str = (char*)malloc(4096);
-    result_str[0] = '\0';
-    int result_pos = 0;
+    size_t num_groups = regex.re_nsub + 1;
+    regmatch_t *matches = malloc(sizeof(regmatch_t) * num_groups);
 
-    regmatch_t match;
+    // Build result string (dynamic buffer)
+    size_t cap = 4096;
+    size_t result_pos = 0;
+    char *result_str = malloc(cap);
+    result_str[0] = '\0';
+
     char *search_str = str;
 
-    while (regexec(&regex, search_str, 1, &match, 0) == 0) {
+    while (regexec(&regex, search_str, num_groups, matches, 0) == 0) {
         // Copy text before match
-        int pre_len = match.rm_so;
-        if (result_pos + pre_len < 4096) {
-            strncat(result_str + result_pos, search_str, pre_len);
-            result_pos += pre_len;
+        int pre_len = matches[0].rm_so;
+        if (result_pos + pre_len + 1 >= cap) {
+            cap = cap + pre_len + 256;
+            result_str = realloc(result_str, cap);
         }
+        strncat(result_str, search_str, pre_len);
+        result_pos += pre_len;
 
-        // Copy replacement
-        int repl_len = strlen(replacement);
-        if (result_pos + repl_len < 4096) {
-            strcat(result_str + result_pos, replacement);
-            result_pos += repl_len;
+        // Expand replacement with backreferences \1..\9
+        for (const char *rp = replacement; *rp; rp++) {
+            if (*rp == '\\' && rp[1] >= '0' && rp[1] <= '9') {
+                int idx = rp[1] - '0';
+                if (idx < (int)num_groups && matches[idx].rm_so != -1) {
+                    int mlen = matches[idx].rm_eo - matches[idx].rm_so;
+                    if (result_pos + mlen + 1 >= cap) {
+                        cap = cap + mlen + 256;
+                        result_str = realloc(result_str, cap);
+                    }
+                    strncat(result_str, search_str + matches[idx].rm_so, mlen);
+                    result_pos += mlen;
+                }
+                rp++; // skip digit
+            } else {
+                if (result_pos + 2 >= cap) {
+                    cap *= 2;
+                    result_str = realloc(result_str, cap);
+                }
+                result_str[result_pos++] = *rp;
+                result_str[result_pos] = '\0';
+            }
         }
 
         // Move to next position
-        search_str += match.rm_eo;
+        search_str += matches[0].rm_eo;
 
         // Prevent infinite loop on zero-length matches
-        if (match.rm_eo == 0) {
+        if (matches[0].rm_eo == 0) {
             if (*search_str == '\0') break;
-            if (result_pos < 4095) {
-                result_str[result_pos++] = *search_str;
-                result_str[result_pos] = '\0';
+            if (result_pos + 2 >= cap) {
+                cap *= 2;
+                result_str = realloc(result_str, cap);
             }
+            result_str[result_pos++] = *search_str;
+            result_str[result_pos] = '\0';
             search_str++;
         }
     }
 
     // Copy remaining text
-    if (result_pos < 4096) {
-        strcat(result_str + result_pos, search_str);
+    size_t remain = strlen(search_str);
+    if (result_pos + remain + 1 >= cap) {
+        cap = result_pos + remain + 1;
+        result_str = realloc(result_str, cap);
     }
+    strcat(result_str, search_str);
+
+    free(matches);
 
     regfree(&regex);
     return create_string_value(result_str);
@@ -1315,6 +1561,80 @@ static Value *builtin_str_join(Value **args, int arg_count) {
     return create_string_value(result_str);
 }
 
+static Value *builtin_str_trim(Value **args, int arg_count) {
+    if (arg_count < 1 || arg_count > 2 || args[0]->type != VAL_STRING || (arg_count == 2 && args[1]->type != VAL_STRING)) {
+        fprintf(stderr, "str_trim(str, [chars]) expects string args\n");
+        exit(1);
+    }
+    const char *s = args[0]->data.string_val;
+    const char *chars = (arg_count == 2) ? args[1]->data.string_val : " \t\n";
+    int start = 0;
+    int end = strlen(s) - 1;
+    while (start <= end && strchr(chars, s[start])) start++;
+    while (end >= start && strchr(chars, s[end])) end--;
+    int len = end - start + 1;
+    if (len < 0) len = 0;
+    char *out = malloc(len + 1);
+    strncpy(out, s + start, len);
+    out[len] = '\0';
+    return create_string_value(out);
+}
+
+static Value *builtin_str_format(Value **args, int arg_count) {
+    if (arg_count < 1 || args[0]->type != VAL_STRING) {
+        fprintf(stderr, "str_format requires format string\n");
+        exit(1);
+    }
+    const char *fmt = args[0]->data.string_val;
+    int ai = 1;
+    int cap = 256, len = 0;
+    char *buf = malloc(cap);
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') {
+            if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); }
+            buf[len++] = *p;
+            continue;
+        }
+        p++;
+        if (*p == '%') { if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); } buf[len++] = '%'; continue; }
+        int precision = -1;
+        if (*p == '.') {
+            p++;
+            precision = 0;
+            while (*p >= '0' && *p <= '9') { precision = precision * 10 + (*p - '0'); p++; }
+        }
+        if (ai >= arg_count) { fprintf(stderr, "str_format: not enough args\n"); exit(1); }
+        Value *v = args[ai++];
+        char tmp[256];
+        if (*p == 'd') {
+            long iv = (v->type == VAL_INT) ? v->data.int_val : (long)value_to_double_interp(v);
+            snprintf(tmp, sizeof(tmp), "%ld", iv);
+        } else if (*p == 'f') {
+            double dv = value_to_double_interp(v);
+            if (precision >= 0) {
+                char fmtbuf[16];
+                snprintf(fmtbuf, sizeof(fmtbuf), "%%.%df", precision);
+                snprintf(tmp, sizeof(tmp), fmtbuf, dv);
+            } else {
+                snprintf(tmp, sizeof(tmp), "%f", dv);
+            }
+        } else if (*p == 's') {
+            const char *sv = v->type == VAL_STRING ? v->data.string_val : "";
+            if (precision >= 0) snprintf(tmp, sizeof(tmp), "%.*s", precision, sv);
+            else snprintf(tmp, sizeof(tmp), "%s", sv);
+        } else {
+            fprintf(stderr, "str_format: unsupported specifier %%%c\n", *p);
+            exit(1);
+        }
+        int tlen = strlen(tmp);
+        while (len + tlen >= cap) { cap *= 2; buf = realloc(buf, cap); }
+        memcpy(buf + len, tmp, tlen);
+        len += tlen;
+    }
+    buf[len] = '\0';
+    return create_string_value(buf);
+}
+
 static Value *builtin_cmd_args(Value **args, int arg_count) {
     Value *result = create_array_value();
     // Start from index 2 to skip the program name (argv[0]) and script name (argv[1])
@@ -1331,18 +1651,37 @@ static void setup_builtins() {
     env_define(global_env, "int", create_builtin_value(builtin_int));
     env_define(global_env, "float", create_builtin_value(builtin_float));
     env_define(global_env, "str", create_builtin_value(builtin_str));
+    env_define(global_env, "sin", create_builtin_value(builtin_sin));
+    env_define(global_env, "cos", create_builtin_value(builtin_cos));
+    env_define(global_env, "asin", create_builtin_value(builtin_asin));
+    env_define(global_env, "acos", create_builtin_value(builtin_acos));
+    env_define(global_env, "log", create_builtin_value(builtin_log));
+    env_define(global_env, "sqrt", create_builtin_value(builtin_sqrt));
+    env_define(global_env, "exp", create_builtin_value(builtin_exp));
+    env_define(global_env, "ceil", create_builtin_value(builtin_ceil));
+    env_define(global_env, "floor", create_builtin_value(builtin_floor));
+    env_define(global_env, "round", create_builtin_value(builtin_round_val));
+    env_define(global_env, "pow", create_builtin_value(builtin_pow_val));
+    env_define(global_env, "random", create_builtin_value(builtin_random_val));
     env_define(global_env, "type", create_builtin_value(builtin_type));
     env_define(global_env, "append", create_builtin_value(builtin_append));
     env_define(global_env, "keys", create_builtin_value(builtin_keys));
     env_define(global_env, "values", create_builtin_value(builtin_values));
     env_define(global_env, "input", create_builtin_value(builtin_input));
-    env_define(global_env, "read", create_builtin_value(builtin_read));
-    env_define(global_env, "write", create_builtin_value(builtin_write));
+    env_define(global_env, "file_read", create_builtin_value(builtin_file_read));
+    env_define(global_env, "file_write", create_builtin_value(builtin_file_write));
+    env_define(global_env, "file_append", create_builtin_value(builtin_file_append));
+    env_define(global_env, "file_size", create_builtin_value(builtin_file_size));
+    env_define(global_env, "file_exist", create_builtin_value(builtin_file_exist));
+    env_define(global_env, "read", create_builtin_value(builtin_file_read));   // backward compat
+    env_define(global_env, "write", create_builtin_value(builtin_file_write)); // backward compat
     env_define(global_env, "regexp_match", create_builtin_value(builtin_regexp_match));
     env_define(global_env, "regexp_find", create_builtin_value(builtin_regexp_find));
     env_define(global_env, "regexp_replace", create_builtin_value(builtin_regexp_replace));
     env_define(global_env, "str_split", create_builtin_value(builtin_str_split));
     env_define(global_env, "str_join", create_builtin_value(builtin_str_join));
+    env_define(global_env, "str_trim", create_builtin_value(builtin_str_trim));
+    env_define(global_env, "str_format", create_builtin_value(builtin_str_format));
     env_define(global_env, "cmd_args", create_builtin_value(builtin_cmd_args));
     env_define(global_env, "remove", create_builtin_value(builtin_remove));
     env_define(global_env, "math", create_builtin_value(builtin_math));
@@ -1480,7 +1819,55 @@ static int is_truthy(Value *v) {
     return 1;
 }
 
+static int value_in(Value *left, Value *right) {
+    if (right->type == VAL_ARRAY) {
+        Array *arr = right->data.array_val;
+        for (int i = 0; i < arr->size; i++) {
+            Value *elem = arr->elements[i];
+            if (left->type == elem->type) {
+                if (left->type == VAL_INT && left->data.int_val == elem->data.int_val) return 1;
+                if (left->type == VAL_FLOAT && left->data.float_val == elem->data.float_val) return 1;
+                if (left->type == VAL_STRING && strcmp(left->data.string_val, elem->data.string_val) == 0) return 1;
+                if (left->type == VAL_BOOL && left->data.bool_val == elem->data.bool_val) return 1;
+            }
+        }
+        return 0;
+    } else if (right->type == VAL_DICT) {
+        if (left->type != VAL_STRING) {
+            type_errorf("Dictionary keys must be strings");
+        }
+        Dict *dict = right->data.dict_val;
+        for (int i = 0; i < HASH_SIZE; i++) {
+            DictEntry *entry = dict->buckets[i];
+            while (entry != NULL) {
+                if (strcmp(entry->key, left->data.string_val) == 0) return 1;
+                entry = entry->next;
+            }
+        }
+        return 0;
+    } else if (right->type == VAL_STRING) {
+        if (left->type != VAL_STRING) {
+            type_errorf("Substring for 'in' must be a string");
+        }
+        return strstr(right->data.string_val, left->data.string_val) != NULL;
+    }
+    type_errorf("'in' not supported for this type");
+}
+
 static Value *eval_binary_op(Value *left, Operator op, Value *right) {
+    #define TC_TYPE(v) ((v)->type)
+    #define TC_IS_STRING(v) ((v).type == VAL_STRING)
+    #define TC_IS_ARRAY(v) ((v).type == VAL_ARRAY)
+    #define TC_IS_DICT(v) ((v).type == VAL_DICT)
+    #define TC_IS_BOOL(v) ((v).type == VAL_BOOL)
+    #define TC_IS_NUMERIC(v) ((v).type == VAL_INT || (v).type == VAL_FLOAT)
+    #define TC_IS_NULL(v) ((v).type == VAL_NULL)
+    #define TC_ERR(ctx_line, ctx_file, fmt, ...) type_errorf(fmt, ##__VA_ARGS__)
+    #define TC_CTX_LINE (err_line)
+    #define TC_CTX_FILE (err_file)
+    #define REQUIRE_NUMERIC(opname) TC_REQUIRE_NUMERIC((opname), (*left), (*right))
+    #define REQUIRE_BOTH_STRING() TC_REQUIRE_STRING_CONCAT((*left), (*right))
+
     switch (op) {
         case OP_ADD:
             if (left->type == VAL_ARRAY && right->type == VAL_ARRAY) {
@@ -1497,17 +1884,14 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
                 return arr;
             }
             if (left->type == VAL_STRING || right->type == VAL_STRING) {
+                if (!(left->type == VAL_STRING && right->type == VAL_STRING)) {
+                    type_errorf("Type error: string concatenation requires two strings");
+                }
                 char buf[1024];
-                char left_str[512], right_str[512];
-                if (left->type == VAL_STRING) strcpy(left_str, left->data.string_val);
-                else if (left->type == VAL_INT) sprintf(left_str, "%d", left->data.int_val);
-                else sprintf(left_str, "%g", left->data.float_val);
-                if (right->type == VAL_STRING) strcpy(right_str, right->data.string_val);
-                else if (right->type == VAL_INT) sprintf(right_str, "%d", right->data.int_val);
-                else sprintf(right_str, "%g", right->data.float_val);
-                sprintf(buf, "%s%s", left_str, right_str);
+                snprintf(buf, sizeof(buf), "%s%s", left->data.string_val, right->data.string_val);
                 return create_string_value(buf);
             }
+            REQUIRE_NUMERIC("addition");
             if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
@@ -1516,6 +1900,7 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_int_value(left->data.int_val + right->data.int_val);
 
         case OP_SUB:
+            REQUIRE_NUMERIC("subtraction");
             if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
@@ -1524,6 +1909,7 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_int_value(left->data.int_val - right->data.int_val);
 
         case OP_MUL:
+            REQUIRE_NUMERIC("multiplication");
             if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
@@ -1532,77 +1918,114 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_int_value(left->data.int_val * right->data.int_val);
 
         case OP_DIV:
+            REQUIRE_NUMERIC("division");
             if (left->type == VAL_INT && right->type == VAL_INT) {
+                if (right->data.int_val == 0) {
+                    type_errorf("Division by zero");
+                }
                 return create_int_value(left->data.int_val / right->data.int_val);
             }
             double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
             double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
+            if (r == 0) {
+                type_errorf("Division by zero");
+            }
             return create_float_value(l / r);
 
         case OP_MOD:
+            REQUIRE_NUMERIC("modulo");
+            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
+                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
+                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
+                return create_float_value(fmod(l, r));
+            }
             return create_int_value(left->data.int_val % right->data.int_val);
 
         case OP_EQ:
-            if (left->type != right->type) return create_bool_value(0);
-            if (left->type == VAL_INT) return create_bool_value(left->data.int_val == right->data.int_val);
-            if (left->type == VAL_FLOAT) return create_bool_value(left->data.float_val == right->data.float_val);
-            if (left->type == VAL_STRING) return create_bool_value(strcmp(left->data.string_val, right->data.string_val) == 0);
-            if (left->type == VAL_BOOL) return create_bool_value(left->data.bool_val == right->data.bool_val);
-            if (left->type == VAL_NULL) return create_bool_value(1);
+            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
+                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
+                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
+                return create_bool_value(l == r);
+            }
+            if (left->type == VAL_STRING && right->type == VAL_STRING)
+                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) == 0);
+            if (left->type == VAL_BOOL && right->type == VAL_BOOL)
+                return create_bool_value(left->data.bool_val == right->data.bool_val);
+            if (left->type == VAL_NULL && right->type == VAL_NULL) return create_bool_value(1);
+            if (left->type == right->type)
+                return create_bool_value(left->data.int_val == right->data.int_val);
             return create_bool_value(0);
 
         case OP_NE:
-            if (left->type != right->type) return create_bool_value(1);
-            if (left->type == VAL_INT) return create_bool_value(left->data.int_val != right->data.int_val);
-            if (left->type == VAL_FLOAT) return create_bool_value(left->data.float_val != right->data.float_val);
-            if (left->type == VAL_STRING) return create_bool_value(strcmp(left->data.string_val, right->data.string_val) != 0);
-            if (left->type == VAL_BOOL) return create_bool_value(left->data.bool_val != right->data.bool_val);
-            if (left->type == VAL_NULL) return create_bool_value(0);
+            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
+                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
+                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
+                return create_bool_value(l != r);
+            }
+            if (left->type == VAL_STRING && right->type == VAL_STRING)
+                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) != 0);
+            if (left->type == VAL_BOOL && right->type == VAL_BOOL)
+                return create_bool_value(left->data.bool_val != right->data.bool_val);
+            if (left->type == VAL_NULL && right->type == VAL_NULL) return create_bool_value(0);
+            if (left->type == right->type)
+                return create_bool_value(left->data.int_val != right->data.int_val);
             return create_bool_value(1);
 
         case OP_LT:
             if (left->type == VAL_STRING && right->type == VAL_STRING) {
                 return create_bool_value(strcmp(left->data.string_val, right->data.string_val) < 0);
             }
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
+            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
+                return create_bool_value(left->data.bool_val < right->data.bool_val);
+            }
+            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
                 return create_bool_value(l < r);
             }
-            return create_bool_value(left->data.int_val < right->data.int_val);
+            type_errorf("Type error: '<' requires numbers, bools, or strings of same type");
 
         case OP_LE:
             if (left->type == VAL_STRING && right->type == VAL_STRING) {
                 return create_bool_value(strcmp(left->data.string_val, right->data.string_val) <= 0);
             }
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
+            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
+                return create_bool_value(left->data.bool_val <= right->data.bool_val);
+            }
+            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
                 return create_bool_value(l <= r);
             }
-            return create_bool_value(left->data.int_val <= right->data.int_val);
+            type_errorf("Type error: '<=' requires numbers, bools, or strings of same type");
 
         case OP_GT:
             if (left->type == VAL_STRING && right->type == VAL_STRING) {
                 return create_bool_value(strcmp(left->data.string_val, right->data.string_val) > 0);
             }
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
+            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
+                return create_bool_value(left->data.bool_val > right->data.bool_val);
+            }
+            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
                 return create_bool_value(l > r);
             }
-            return create_bool_value(left->data.int_val > right->data.int_val);
+            type_errorf("Type error: '>' requires numbers, bools, or strings of same type");
 
         case OP_GE:
             if (left->type == VAL_STRING && right->type == VAL_STRING) {
                 return create_bool_value(strcmp(left->data.string_val, right->data.string_val) >= 0);
             }
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
+            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
+                return create_bool_value(left->data.bool_val >= right->data.bool_val);
+            }
+            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
                 double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
                 double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
                 return create_bool_value(l >= r);
             }
-            return create_bool_value(left->data.int_val >= right->data.int_val);
+            type_errorf("Type error: '>=' requires numbers, bools, or strings of same type");
 
         case OP_AND:
             return create_bool_value(is_truthy(left) && is_truthy(right));
@@ -1611,61 +2034,10 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
             return create_bool_value(is_truthy(left) || is_truthy(right));
 
         case OP_IN:
-            // Check if left is in right (element in array, key in dict, substring in string)
-            if (right->type == VAL_ARRAY) {
-                // element in array
-                Array *arr = right->data.array_val;
-                for (int i = 0; i < arr->size; i++) {
-                    Value *elem = arr->elements[i];
-                    // Compare elements
-                    if (left->type == elem->type) {
-                        if (left->type == VAL_INT && left->data.int_val == elem->data.int_val) {
-                            return create_bool_value(1);
-                        }
-                        if (left->type == VAL_FLOAT && left->data.float_val == elem->data.float_val) {
-                            return create_bool_value(1);
-                        }
-                        if (left->type == VAL_STRING && strcmp(left->data.string_val, elem->data.string_val) == 0) {
-                            return create_bool_value(1);
-                        }
-                        if (left->type == VAL_BOOL && left->data.bool_val == elem->data.bool_val) {
-                            return create_bool_value(1);
-                        }
-                    }
-                }
-                return create_bool_value(0);
-            } else if (right->type == VAL_DICT) {
-                // key in dict
-                if (left->type != VAL_STRING) {
-                    fprintf(stderr, "Dictionary keys must be strings\n");
-                    exit(1);
-                }
-                Dict *dict = right->data.dict_val;
-                for (int i = 0; i < HASH_SIZE; i++) {
-                    DictEntry *entry = dict->buckets[i];
-                    while (entry != NULL) {
-                        if (strcmp(entry->key, left->data.string_val) == 0) {
-                            return create_bool_value(1);
-                        }
-                        entry = entry->next;
-                    }
-                }
-                return create_bool_value(0);
-            } else if (right->type == VAL_STRING) {
-                // substring in string
-                if (left->type != VAL_STRING) {
-                    fprintf(stderr, "Can only check if string is in string\n");
-                    exit(1);
-                }
-                if (strstr(right->data.string_val, left->data.string_val) != NULL) {
-                    return create_bool_value(1);
-                } else {
-                    return create_bool_value(0);
-                }
-            } else {
-                fprintf(stderr, "IN operator requires array, dict, or string on the right side\n");
-                exit(1);
-            }
+            return create_bool_value(value_in(left, right));
+
+        case OP_NOT_IN:
+            return create_bool_value(!value_in(left, right));
 
         default:
             fprintf(stderr, "Unknown binary operator\n");
@@ -1674,6 +2046,7 @@ static Value *eval_binary_op(Value *left, Operator op, Value *right) {
 }
 
 static Value *eval_expression(ASTNode *node) {
+    if (node) set_error_ctx(node->line, node->file);
     switch (node->type) {
         case NODE_INT_LITERAL:
             return create_int_value(node->data.int_literal.value);
@@ -1921,8 +2294,12 @@ static Value *eval_expression(ASTNode *node) {
 }
 
 static void eval_statement(ASTNode *node) {
+    if (node) set_error_ctx(node->line, node->file);
     switch (node->type) {
         case NODE_VAR_DECL: {
+            if (env_exists_current(current_env, node->data.var_decl.name)) {
+                type_errorf("Redefinition of '%s' in the same scope", node->data.var_decl.name);
+            }
             Value *val = eval_expression(node->data.var_decl.value);
             env_define(current_env, node->data.var_decl.name, val);
             break;
@@ -1989,15 +2366,19 @@ static void eval_statement(ASTNode *node) {
                 fprintf(stderr, "Exception stack overflow\n");
                 exit(1);
             }
-            int idx = exception_top++;
-            int jmp_res = setjmp(exception_stack[idx]);
+            Environment *prev_env = current_env;
+            volatile int saved_idx = exception_top++;
+            int jmp_res = setjmp(exception_stack[saved_idx]);
             if (jmp_res == 0) {
-                execute_block(node->data.try_catch.try_block);
-                exception_top = idx;
+                ASTNodeList *stmt = node->data.try_catch.try_block;
+                while (stmt != NULL && !has_returned) {
+                    eval_statement(stmt->node);
+                    stmt = stmt->next;
+                }
+                exception_top = saved_idx;
             } else {
-                exception_top = idx;
-                Environment *prev_env = current_env;
-                Environment *catch_env = create_environment(prev_env);
+                exception_top = saved_idx;
+                Environment *catch_env = prev_env;
                 // Prepend catch location
                 char buf[512];
                 const char *cfile = node->file ? node->file : "<input>";
@@ -2006,11 +2387,11 @@ static void eval_statement(ASTNode *node) {
                     char *combined = malloc(strlen(buf) + strlen(exception_value->data.string_val) + 1);
                     strcpy(combined, buf);
                     strcat(combined, exception_value->data.string_val);
-                    env_define(catch_env, node->data.try_catch.catch_var, create_string_value(combined));
+                    env_set_or_define(catch_env, node->data.try_catch.catch_var, create_string_value(combined));
                     free(combined);
                 } else {
-                    env_define(catch_env, node->data.try_catch.catch_var,
-                               exception_value ? exception_value : create_null_value());
+                    env_set_or_define(catch_env, node->data.try_catch.catch_var,
+                                      exception_value ? exception_value : create_null_value());
                 }
                 current_env = catch_env;
                 exception_value = NULL;
@@ -2073,6 +2454,42 @@ static void eval_statement(ASTNode *node) {
                         }
                         current_env = prev_env;
                     }
+                }
+            }
+            loop_env_top--;
+            current_env = loop_base;
+            break;
+        }
+
+        case NODE_FOR_STMT: {
+            Value *start_v = eval_expression(node->data.for_stmt.start);
+            Value *end_v = eval_expression(node->data.for_stmt.end);
+            long start = (long)value_to_double_interp(start_v);
+            long end = (long)value_to_double_interp(end_v);
+            long step = (start <= end) ? 1 : -1;
+
+            Environment *loop_base = current_env;
+            loop_env_stack[loop_env_top++] = loop_base;
+            if (setjmp(break_jmp) == 0) {
+                long cur = start;
+                while (1) {
+                    if (has_returned) break;
+                    int cont = (step > 0) ? (cur <= end) : (cur >= end);
+                    if (!cont) break;
+
+                    if (setjmp(continue_jmp) == 0) {
+                        Environment *iter_env = create_environment(loop_base);
+                        env_define(iter_env, node->data.for_stmt.index_var, create_int_value((int)cur));
+                        Environment *prev_env = current_env;
+                        current_env = iter_env;
+                        ASTNodeList *stmt = node->data.for_stmt.body;
+                        while (stmt != NULL && !has_returned) {
+                            eval_statement(stmt->node);
+                            stmt = stmt->next;
+                        }
+                        current_env = prev_env;
+                    }
+                    cur += step;
                 }
             }
             loop_env_top--;

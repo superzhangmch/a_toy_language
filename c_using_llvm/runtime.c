@@ -3,6 +3,8 @@
 #include <math.h>
 #include <ctype.h>
 #include <setjmp.h>
+#include <stdarg.h>
+#include "type_check_common.h"
 
 // Global storage for command line arguments
 static int g_argc = 0;
@@ -10,6 +12,61 @@ static char **g_argv = NULL;
 static jmp_buf try_stack[256];
 static int try_top = 0;
 static Value current_exception = {TYPE_NULL, 0};
+static int current_err_line = 0;
+static const char *current_err_file = NULL;
+static double value_to_double(Value v);
+
+void set_source_ctx(int line, const char *file) {
+    current_err_line = line;
+    current_err_file = file;
+}
+
+static __attribute__((noreturn)) void type_error_ctx(int line, const char *file, const char *fmt, ...) {
+    fprintf(stderr, "Error");
+    if (file) fprintf(stderr, " at %s", file);
+    else if (current_err_file) fprintf(stderr, " at %s", current_err_file);
+    if (line > 0) fprintf(stderr, ":%d", line);
+    else if (current_err_line > 0) fprintf(stderr, ":%d", current_err_line);
+    fprintf(stderr, ": ");
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+    exit(1);
+}
+
+static __attribute__((noreturn)) void type_error(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    fprintf(stderr, "Error");
+    if (current_err_file) fprintf(stderr, " at %s", current_err_file);
+    if (current_err_line > 0) fprintf(stderr, ":%d", current_err_line);
+    fprintf(stderr, ": ");
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+    exit(1);
+}
+
+// Shared type-check accessor mappings for type_check_common.h
+#define TC_TYPE(v) ((v).type)
+#define TC_IS_STRING(v) ((v).type == TYPE_STRING)
+#define TC_IS_ARRAY(v) ((v).type == TYPE_ARRAY)
+#define TC_IS_DICT(v) ((v).type == TYPE_DICT)
+#define TC_IS_BOOL(v) ((v).type == TYPE_BOOL)
+#define TC_IS_NUMERIC(v) ((v).type == TYPE_INT || (v).type == TYPE_FLOAT)
+#define TC_IS_NULL(v) ((v).type == TYPE_NULL)
+#define TC_ERR(ctx_line, ctx_file, fmt, ...) type_error_ctx((ctx_line), (ctx_file), (fmt), ##__VA_ARGS__)
+#define TC_CTX_LINE (line)
+#define TC_CTX_FILE (file)
+
+#define REQUIRE_NUMERIC(opname) TC_REQUIRE_NUMERIC((opname), left, right)
+#define REQUIRE_BOTH_STRING() TC_REQUIRE_STRING_CONCAT(left, right)
+#define REQUIRE_IN_RIGHT(R) TC_REQUIRE_IN_RIGHT((R))
+#define REQUIRE_DICT_KEY_STRING(L) TC_REQUIRE_DICT_KEY_STRING((L))
+#define REQUIRE_STRING_SUBSTRING(L) TC_REQUIRE_STRING_SUBSTRING((L))
+#define IS_NUMERIC(t) ((t) == TYPE_INT || (t) == TYPE_FLOAT)
 
 // Array structure
 typedef struct {
@@ -101,13 +158,17 @@ Value make_null(void) {
 
 // Append value to array
 Value append(Value arr, Value val) {
+    if (arr.type != TYPE_ARRAY) {
+        fprintf(stderr, "append requires array as first argument\n");
+        exit(1);
+    }
     Array *a = (Array*)(arr.data);
     if (a->size >= a->capacity) {
         a->capacity *= 2;
         a->data = realloc(a->data, a->capacity * sizeof(Value));
     }
     ((Value*)a->data)[a->size++] = val;
-    Value result = {TYPE_INT, 0};
+    Value result = {TYPE_BOOL, 0};
     return result;
 }
 
@@ -177,9 +238,12 @@ Value len(Value v) {
         char *s = (char*)(v.data);
         Value result = {TYPE_INT, strlen(s)};
         return result;
+    } else if (v.type == TYPE_DICT) {
+        Dict *d = (Dict*)(v.data);
+        Value result = {TYPE_INT, d->size};
+        return result;
     }
-    Value result = {TYPE_INT, 0};
-    return result;
+    type_error("len() requires array, string, or dict");
 }
 
 // Type conversion functions
@@ -190,19 +254,27 @@ Value to_int(Value v) {
         Value result = {TYPE_INT, (long)f};
         return result;
     }
+    if (v.type == TYPE_BOOL) {
+        Value result = {TYPE_INT, v.data};
+        return result;
+    }
     if (v.type == TYPE_STRING) {
         char *str = (char*)v.data;
         long val = atol(str);  // Use atol for long conversion
         Value result = {TYPE_INT, val};
         return result;
     }
-    Value result = {TYPE_INT, 0};
-    return result;
+    type_error("int() requires int/float/bool/string");
 }
 
 Value to_float(Value v) {
     if (v.type == TYPE_FLOAT) return v;
     if (v.type == TYPE_INT) {
+        double f = (double)v.data;
+        Value result = {TYPE_FLOAT, *(long*)&f};
+        return result;
+    }
+    if (v.type == TYPE_BOOL) {
         double f = (double)v.data;
         Value result = {TYPE_FLOAT, *(long*)&f};
         return result;
@@ -213,9 +285,7 @@ Value to_float(Value v) {
         Value result = {TYPE_FLOAT, *(long*)&f};
         return result;
     }
-    double f = 0.0;
-    Value result = {TYPE_FLOAT, *(long*)&f};
-    return result;
+    type_error("float() requires int/float/bool/string");
 }
 
 Value to_string(Value v) {
@@ -233,9 +303,17 @@ Value to_string(Value v) {
         return result;
     } else if (v.type == TYPE_STRING) {
         return v;
+    } else if (v.type == TYPE_BOOL) {
+        const char *s = v.data ? "true" : "false";
+        char *dup = strdup(s);
+        Value result = {TYPE_STRING, (long)dup};
+        return result;
+    } else if (v.type == TYPE_NULL) {
+        char *dup = strdup("null");
+        Value result = {TYPE_STRING, (long)dup};
+        return result;
     }
-    Value result = {TYPE_STRING, (long)""};
-    return result;
+    type_error("str() requires int/float/string/bool/null");
 }
 
 // Convert value to string representation (like str() in Python)
@@ -256,10 +334,13 @@ Value type(Value v) {
         type_name = "array";
     } else if (v.type == TYPE_DICT) {
         type_name = "dict";
+    } else if (v.type == TYPE_BOOL) {
+        type_name = "bool";
     } else if (v.type == TYPE_CLASS) {
         type_name = "class";
     } else if (v.type == TYPE_INSTANCE) {
-        type_name = "instance";
+        Instance *inst = (Instance*)v.data;
+        type_name = inst && inst->cls && inst->cls->name ? inst->cls->name : "instance";
     } else if (v.type == TYPE_NULL) {
         type_name = "null";
     } else {
@@ -352,7 +433,11 @@ Value input(Value prompt) {
 }
 
 // Read file contents
-Value read(Value filename) {
+Value file_read(Value filename) {
+    if (filename.type != TYPE_STRING) {
+        fprintf(stderr, "file_read requires filename string\n");
+        exit(1);
+    }
     char *fname = (char*)(filename.data);
     FILE *f = fopen(fname, "rb");
 
@@ -375,12 +460,16 @@ Value read(Value filename) {
 }
 
 // Write content to file
-Value write(Value content, Value filename) {
+Value file_write(Value content, Value filename) {
+    if (filename.type != TYPE_STRING) {
+        fprintf(stderr, "file_write requires filename string\n");
+        exit(1);
+    }
     char *fname = (char*)(filename.data);
     FILE *f = fopen(fname, "w");
 
     if (f == NULL) {
-        Value result = {TYPE_INT, 0};
+        Value result = {TYPE_BOOL, 0};
         return result;
     }
 
@@ -398,6 +487,68 @@ Value write(Value content, Value filename) {
     Value result = {TYPE_INT, 1};
     return result;
 }
+
+Value file_append(Value content, Value filename) {
+    if (filename.type != TYPE_STRING) {
+        fprintf(stderr, "file_append requires filename string\n");
+        exit(1);
+    }
+    char *fname = (char*)(filename.data);
+    FILE *f = fopen(fname, "a");
+    if (f == NULL) {
+        Value result = {TYPE_BOOL, 0};
+        return result;
+    }
+    if (content.type == TYPE_STRING) {
+        fprintf(f, "%s", (char*)content.data);
+    } else if (content.type == TYPE_INT) {
+        fprintf(f, "%ld", content.data);
+    } else if (content.type == TYPE_FLOAT) {
+        double d = *(double*)&content.data;
+        fprintf(f, "%g", d);
+    }
+    fclose(f);
+    Value result = {TYPE_BOOL, 1};
+    return result;
+}
+
+Value file_size(Value filename) {
+    if (filename.type != TYPE_STRING) {
+        fprintf(stderr, "file_size requires filename string\n");
+        exit(1);
+    }
+    char *fname = (char*)(filename.data);
+    FILE *f = fopen(fname, "rb");
+    if (f == NULL) {
+        Value result = {TYPE_INT, 0};
+        return result;
+    }
+    fseek(f, 0, SEEK_END);
+    long size = ftell(f);
+    fclose(f);
+    Value result = {TYPE_INT, size};
+    return result;
+}
+
+Value file_exist(Value filename) {
+    if (filename.type != TYPE_STRING) {
+        fprintf(stderr, "file_exist requires filename string\n");
+        exit(1);
+    }
+    char *fname = (char*)(filename.data);
+    FILE *f = fopen(fname, "rb");
+    if (f == NULL) {
+        Value result = {TYPE_BOOL, 0};
+        return result;
+    }
+    fclose(f);
+    Value result = {TYPE_BOOL, 1};
+    return result;
+}
+
+// backward-compatible aliases
+Value read(Value filename) { return file_read(filename); }
+Value write(Value content, Value filename) { return file_write(content, filename); }
 
 // ===== Dict Functions =====
 
@@ -521,13 +672,13 @@ Value dict_has(Value dict, Value key) {
 
     while (entry != NULL) {
         if (strcmp(entry->key, key_str) == 0) {
-            Value result = {TYPE_INT, 1};  // true
+            Value result = {TYPE_BOOL, 1};  // true
             return result;
         }
         entry = entry->next;
     }
 
-    Value result = {TYPE_INT, 0};  // false
+    Value result = {TYPE_BOOL, 0};  // false
     return result;
 }
 
@@ -557,8 +708,24 @@ Value keys(Value dict) {
     return dict_keys(dict);
 }
 
+static int is_truthy_rt(Value v) {
+    switch (v.type) {
+        case TYPE_BOOL: return v.data != 0;
+        case TYPE_INT: return v.data != 0;
+        case TYPE_FLOAT: {
+            double f = *(double*)&v.data;
+            return f != 0.0;
+        }
+        case TYPE_STRING: return ((char*)v.data)[0] != '\0';
+        case TYPE_ARRAY: return ((Array*)v.data)->size > 0;
+        case TYPE_DICT: return ((Dict*)v.data)->size > 0;
+        case TYPE_NULL: return 0;
+        default: return 1;
+    }
+}
+
 // IN operator: check if left is in right (element in array, key in dict, substring in string)
-Value in_operator(Value left, Value right) {
+Value in_operator(Value left, Value right, int line, const char *file) {
     if (right.type == TYPE_ARRAY) {
         // Check if element is in array
         Array *a = (Array*)(right.data);
@@ -586,41 +753,57 @@ Value in_operator(Value left, Value right) {
             }
         }
 
-        Value result = {TYPE_INT, 0};  // false
+        Value result = {TYPE_BOOL, 0};  // false
         return result;
 
     } else if (right.type == TYPE_DICT) {
         // Check if key is in dict (use dict_has)
+        REQUIRE_DICT_KEY_STRING(left);
         return dict_has(right, left);
 
     } else if (right.type == TYPE_STRING) {
         // Check if substring is in string
-        if (left.type != TYPE_STRING) {
-            fprintf(stderr, "Can only check if string is in string\n");
-            exit(1);
-        }
+        REQUIRE_STRING_SUBSTRING(left);
 
         char *left_str = (char*)(left.data);
         char *right_str = (char*)(right.data);
 
         if (strstr(right_str, left_str) != NULL) {
-            Value result = {TYPE_INT, 1};  // true
+            Value result = {TYPE_BOOL, 1};  // true
             return result;
         } else {
-            Value result = {TYPE_INT, 0};  // false
+            Value result = {TYPE_BOOL, 0};  // false
             return result;
         }
 
     } else {
-        fprintf(stderr, "IN operator requires array, dict, or string on the right side\n");
-        exit(1);
+        REQUIRE_IN_RIGHT(right);
     }
 }
 
+Value not_in_operator(Value left, Value right, int line, const char *file) {
+    Value v = in_operator(left, right, line, file);
+    int truth = is_truthy_rt(v);
+    Value result = {TYPE_BOOL, truth ? 0 : 1};
+    return result;
+}
+
 // Binary operations - handles all types including string concatenation
-Value binary_op(Value left, int op, Value right) {
+Value binary_op(Value left, int op, Value right, int line, const char *file) {
     // OP codes: ADD=0, SUB=1, MUL=2, DIV=3, MOD=4, EQ=5, NE=6, LT=7, LE=8, GT=9, GE=10
-    
+#define TC_TYPE(v) ((v).type)
+#define TC_IS_STRING(v) ((v).type == TYPE_STRING)
+#define TC_IS_ARRAY(v) ((v).type == TYPE_ARRAY)
+#define TC_IS_DICT(v) ((v).type == TYPE_DICT)
+#define TC_IS_BOOL(v) ((v).type == TYPE_BOOL)
+#define TC_IS_NUMERIC(v) ((v).type == TYPE_INT || (v).type == TYPE_FLOAT)
+#define TC_IS_NULL(v) ((v).type == TYPE_NULL)
+#define TC_ERR(ctx_line, ctx_file, fmt, ...) type_error_ctx((ctx_line), (ctx_file), (fmt), ##__VA_ARGS__)
+#define TC_CTX_LINE (line)
+#define TC_CTX_FILE (file)
+
+#define REQUIRE_NUMERIC(opname) TC_REQUIRE_NUMERIC((opname), left, right)
+#define REQUIRE_BOTH_STRING() TC_REQUIRE_STRING_CONCAT(left, right)
     switch (op) {
         case 0: { // ADD
             // Array concatenation
@@ -642,34 +825,17 @@ Value binary_op(Value left, int op, Value right) {
 
             // String concatenation
             if (left.type == TYPE_STRING || right.type == TYPE_STRING) {
+                REQUIRE_BOTH_STRING();
                 char buf[1024];
                 char left_str[512], right_str[512];
                 
                 // Convert left to string
-                if (left.type == TYPE_STRING) {
-                    strncpy(left_str, (char*)left.data, sizeof(left_str) - 1);
-                    left_str[sizeof(left_str) - 1] = '\0';
-                } else if (left.type == TYPE_INT) {
-                    snprintf(left_str, sizeof(left_str), "%ld", left.data);
-                } else if (left.type == TYPE_FLOAT) {
-                    double f = *(double*)&left.data;
-                    snprintf(left_str, sizeof(left_str), "%g", f);
-                } else {
-                    left_str[0] = '\0';
-                }
+                strncpy(left_str, (char*)left.data, sizeof(left_str) - 1);
+                left_str[sizeof(left_str) - 1] = '\0';
                 
                 // Convert right to string
-                if (right.type == TYPE_STRING) {
-                    strncpy(right_str, (char*)right.data, sizeof(right_str) - 1);
-                    right_str[sizeof(right_str) - 1] = '\0';
-                } else if (right.type == TYPE_INT) {
-                    snprintf(right_str, sizeof(right_str), "%ld", right.data);
-                } else if (right.type == TYPE_FLOAT) {
-                    double f = *(double*)&right.data;
-                    snprintf(right_str, sizeof(right_str), "%g", f);
-                } else {
-                    right_str[0] = '\0';
-                }
+                strncpy(right_str, (char*)right.data, sizeof(right_str) - 1);
+                right_str[sizeof(right_str) - 1] = '\0';
                 
                 // Concatenate
                 snprintf(buf, sizeof(buf), "%s%s", left_str, right_str);
@@ -679,6 +845,7 @@ Value binary_op(Value left, int op, Value right) {
             }
             
             // Numeric addition
+            REQUIRE_NUMERIC("addition");
             if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
                 double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
                 double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
@@ -693,6 +860,7 @@ Value binary_op(Value left, int op, Value right) {
         }
         
         case 1: { // SUB
+            REQUIRE_NUMERIC("subtraction");
             if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
                 double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
                 double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
@@ -707,6 +875,7 @@ Value binary_op(Value left, int op, Value right) {
         }
         
         case 2: { // MUL
+            REQUIRE_NUMERIC("multiplication");
             if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
                 double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
                 double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
@@ -721,6 +890,7 @@ Value binary_op(Value left, int op, Value right) {
         }
         
         case 3: { // DIV
+            REQUIRE_NUMERIC("division");
             if (left.type == TYPE_INT && right.type == TYPE_INT) {
                 long quot = left.data / right.data;
                 Value result = {TYPE_INT, quot};
@@ -735,105 +905,127 @@ Value binary_op(Value left, int op, Value right) {
         }
         
         case 4: { // MOD
+            REQUIRE_NUMERIC("modulo");
+            if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                double rem = fmod(l, r);
+                Value result = {TYPE_FLOAT, *(long*)&rem};
+                return result;
+            }
             long rem = left.data % right.data;
             Value result = {TYPE_INT, rem};
             return result;
         }
         
         case 5: { // EQ
-            if (left.type != right.type) {
-                Value result = {TYPE_INT, 0};
+            if (IS_NUMERIC(left.type) && IS_NUMERIC(right.type)) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                Value result = {TYPE_INT, l == r};
                 return result;
             }
-            if (left.type == TYPE_STRING) {
+            if (left.type == right.type && left.type == TYPE_STRING) {
                 int eq = strcmp((char*)left.data, (char*)right.data) == 0;
                 Value result = {TYPE_INT, eq};
                 return result;
-            } else {
+            }
+            if (left.type == right.type) {
                 int eq = (left.data == right.data);
                 Value result = {TYPE_INT, eq};
                 return result;
             }
+            Value result = {TYPE_INT, 0};
+            return result;
         }
         
         case 6: { // NE
-            if (left.type != right.type) {
-                Value result = {TYPE_INT, 1};
+            if (IS_NUMERIC(left.type) && IS_NUMERIC(right.type)) {
+                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                Value result = {TYPE_INT, l != r};
                 return result;
             }
-            if (left.type == TYPE_STRING) {
+            if (left.type == right.type && left.type == TYPE_STRING) {
                 int ne = strcmp((char*)left.data, (char*)right.data) != 0;
                 Value result = {TYPE_INT, ne};
                 return result;
-            } else {
+            }
+            if (left.type == right.type) {
                 int ne = (left.data != right.data);
                 Value result = {TYPE_INT, ne};
                 return result;
             }
+            Value result = {TYPE_INT, 1};
+            return result;
         }
         
         case 7: { // LT
+            TC_COMPARE_GUARD(left, right);
             if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
                 int lt = strcmp((char*)left.data, (char*)right.data) < 0;
                 Value result = {TYPE_INT, lt};
                 return result;
-            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
-                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
-                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
-                Value result = {TYPE_INT, l < r};
-                return result;
-            } else {
-                Value result = {TYPE_INT, left.data < right.data};
+            }
+            if (left.type == TYPE_BOOL && right.type == TYPE_BOOL) {
+                Value result = {TYPE_INT, (left.data < right.data)};
                 return result;
             }
+            double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+            double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+            Value result = {TYPE_INT, l < r};
+            return result;
         }
         
         case 8: { // LE
+            TC_COMPARE_GUARD(left, right);
             if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
                 int le = strcmp((char*)left.data, (char*)right.data) <= 0;
                 Value result = {TYPE_INT, le};
                 return result;
-            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
-                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
-                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
-                Value result = {TYPE_INT, l <= r};
-                return result;
-            } else {
-                Value result = {TYPE_INT, left.data <= right.data};
+            }
+            if (left.type == TYPE_BOOL && right.type == TYPE_BOOL) {
+                Value result = {TYPE_INT, (left.data <= right.data)};
                 return result;
             }
+            double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+            double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+            Value result = {TYPE_INT, l <= r};
+            return result;
         }
         
         case 9: { // GT
+            TC_COMPARE_GUARD(left, right);
             if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
                 int gt = strcmp((char*)left.data, (char*)right.data) > 0;
                 Value result = {TYPE_INT, gt};
                 return result;
-            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
-                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
-                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
-                Value result = {TYPE_INT, l > r};
-                return result;
-            } else {
-                Value result = {TYPE_INT, left.data > right.data};
+            }
+            if (left.type == TYPE_BOOL && right.type == TYPE_BOOL) {
+                Value result = {TYPE_INT, (left.data > right.data)};
                 return result;
             }
+            double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+            double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+            Value result = {TYPE_INT, l > r};
+            return result;
         }
         
         case 10: { // GE
+            TC_COMPARE_GUARD(left, right);
             if (left.type == TYPE_STRING && right.type == TYPE_STRING) {
                 int ge = strcmp((char*)left.data, (char*)right.data) >= 0;
                 Value result = {TYPE_INT, ge};
                 return result;
-            } else if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
-                double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
-                double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
-                Value result = {TYPE_INT, l >= r};
-                return result;
-            } else {
-                Value result = {TYPE_INT, left.data >= right.data};
+            }
+            if (left.type == TYPE_BOOL && right.type == TYPE_BOOL) {
+                Value result = {TYPE_INT, (left.data >= right.data)};
                 return result;
             }
+            double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
+            double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+            Value result = {TYPE_INT, l >= r};
+            return result;
         }
 
         case 11: { // AND
@@ -987,8 +1179,7 @@ Value regexp_find(Value pattern_val, Value str_val) {
 // regexp_replace(pattern, str, replacement) -> returns new string with replacements
 Value regexp_replace(Value pattern_val, Value str_val, Value replacement_val) {
     if (pattern_val.type != TYPE_STRING || str_val.type != TYPE_STRING || replacement_val.type != TYPE_STRING) {
-        fprintf(stderr, "regexp_replace requires three string arguments\n");
-        exit(1);
+        type_error("regexp_replace requires three string arguments");
     }
 
     char *pattern = (char*)pattern_val.data;
@@ -998,55 +1189,86 @@ Value regexp_replace(Value pattern_val, Value str_val, Value replacement_val) {
     regex_t regex;
     int ret = regcomp(&regex, pattern, REG_EXTENDED);
     if (ret != 0) {
-        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
+        fprintf(stderr, "Error");
+        if (current_err_file) fprintf(stderr, " at %s", current_err_file);
+        if (current_err_line > 0) fprintf(stderr, ":%d", current_err_line);
+        fprintf(stderr, ": Failed to compile regex: %s\n", pattern);
         regfree(&regex);
         // Return original string
         Value result = {TYPE_STRING, (long)strdup(str)};
         return result;
     }
 
-    // Build result string
-    char *result_str = (char*)malloc(4096);
+    size_t num_groups = regex.re_nsub + 1;
+    regmatch_t *matches = malloc(sizeof(regmatch_t) * num_groups);
+
+    // Build result string (dynamic buffer)
+    size_t cap = 4096;
+    size_t result_pos = 0;
+    char *result_str = malloc(cap);
     result_str[0] = '\0';
-    int result_pos = 0;
 
-    regmatch_t match;
     char *search_str = str;
-    int offset = 0;
 
-    while (regexec(&regex, search_str, 1, &match, 0) == 0) {
+    while (regexec(&regex, search_str, num_groups, matches, 0) == 0) {
         // Copy text before match
-        int pre_len = match.rm_so;
-        if (result_pos + pre_len < 4096) {
-            strncat(result_str + result_pos, search_str, pre_len);
-            result_pos += pre_len;
+        int pre_len = matches[0].rm_so;
+        if (result_pos + pre_len + 1 >= cap) {
+            cap = cap + pre_len + 256;
+            result_str = realloc(result_str, cap);
         }
+        strncat(result_str, search_str, pre_len);
+        result_pos += pre_len;
 
-        // Copy replacement
-        int repl_len = strlen(replacement);
-        if (result_pos + repl_len < 4096) {
-            strcat(result_str + result_pos, replacement);
-            result_pos += repl_len;
+        // Expand replacement with backreferences \1..\9
+        for (const char *rp = replacement; *rp; rp++) {
+            if (*rp == '\\' && rp[1] >= '0' && rp[1] <= '9') {
+                int idx = rp[1] - '0';
+                if (idx < (int)num_groups && matches[idx].rm_so != -1) {
+                    int mlen = matches[idx].rm_eo - matches[idx].rm_so;
+                    if (result_pos + mlen + 1 >= cap) {
+                        cap = cap + mlen + 256;
+                        result_str = realloc(result_str, cap);
+                    }
+                    strncat(result_str, search_str + matches[idx].rm_so, mlen);
+                    result_pos += mlen;
+                }
+                rp++; // skip digit
+            } else {
+                if (result_pos + 2 >= cap) {
+                    cap *= 2;
+                    result_str = realloc(result_str, cap);
+                }
+                result_str[result_pos++] = *rp;
+                result_str[result_pos] = '\0';
+            }
         }
 
         // Move to next position
-        search_str += match.rm_eo;
+        search_str += matches[0].rm_eo;
 
         // Prevent infinite loop on zero-length matches
-        if (match.rm_eo == 0) {
+        if (matches[0].rm_eo == 0) {
             if (*search_str == '\0') break;
-            if (result_pos < 4095) {
-                result_str[result_pos++] = *search_str;
-                result_str[result_pos] = '\0';
+            if (result_pos + 2 >= cap) {
+                cap *= 2;
+                result_str = realloc(result_str, cap);
             }
+            result_str[result_pos++] = *search_str;
+            result_str[result_pos] = '\0';
             search_str++;
         }
     }
 
     // Copy remaining text
-    if (result_pos < 4096) {
-        strcat(result_str + result_pos, search_str);
+    size_t remain = strlen(search_str);
+    if (result_pos + remain + 1 >= cap) {
+        cap = result_pos + remain + 1;
+        result_str = realloc(result_str, cap);
     }
+    strcat(result_str, search_str);
+
+    free(matches);
 
     regfree(&regex);
 
@@ -1171,6 +1393,89 @@ Value str_join(Value arr_val, Value sep_val) {
     return result;
 }
 
+// Trim characters from both ends of a string
+Value str_trim(Value str_val, Value chars_val) {
+    if (str_val.type != TYPE_STRING) {
+        type_error("str_trim requires string input");
+    }
+    if (!(chars_val.type == TYPE_STRING || chars_val.type == TYPE_NULL || chars_val.type == TYPE_INT)) {
+        // allow default by passing null or fallback
+        type_error("str_trim chars must be string or omitted");
+    }
+    const char *s = (char*)str_val.data;
+    const char *trim_chars = chars_val.type == TYPE_STRING ? (char*)chars_val.data : " \t\n";
+    int start = 0;
+    int end = strlen(s) - 1;
+    while (start <= end && strchr(trim_chars, s[start]) != NULL) start++;
+    while (end >= start && strchr(trim_chars, s[end]) != NULL) end--;
+    int len = end - start + 1;
+    if (len < 0) len = 0;
+    char *res = malloc(len + 1);
+    strncpy(res, s + start, len);
+    res[len] = '\0';
+    Value result = {TYPE_STRING, (long)res};
+    return result;
+}
+
+// Simple formatter supporting %d, %f, %s (with precision for %f and %s)
+Value str_format(Value fmt_val, Value *args, int arg_count) {
+    if (fmt_val.type != TYPE_STRING) {
+        type_error("str_format requires format string");
+    }
+    const char *fmt = (char*)fmt_val.data;
+    int ai = 0;
+    int cap = 256, len = 0;
+    char *buf = malloc(cap);
+    for (const char *p = fmt; *p; p++) {
+        if (*p != '%') {
+            if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); }
+            buf[len++] = *p;
+            continue;
+        }
+        p++;
+        if (*p == '%') { if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); } buf[len++] = '%'; continue; }
+        int precision = -1;
+        if (*p == '.') {
+            p++;
+            precision = 0;
+            while (*p >= '0' && *p <= '9') { precision = precision * 10 + (*p - '0'); p++; }
+        }
+        if (ai >= arg_count) { fprintf(stderr, "str_format: insufficient arguments\n"); exit(1); }
+        Value v = args[ai++];
+        char tmp[256];
+        if (*p == 'd') {
+            long iv = (v.type == TYPE_INT) ? v.data : (long)value_to_double(v);
+            snprintf(tmp, sizeof(tmp), "%ld", iv);
+        } else if (*p == 'f') {
+            double dv = value_to_double(v);
+            if (precision >= 0) {
+                char fmtbuf[16];
+                snprintf(fmtbuf, sizeof(fmtbuf), "%%.%df", precision);
+                snprintf(tmp, sizeof(tmp), fmtbuf, dv);
+            } else {
+                snprintf(tmp, sizeof(tmp), "%f", dv);
+            }
+        } else if (*p == 's') {
+            const char *sv = (v.type == TYPE_STRING) ? (char*)v.data : "";
+            if (precision >= 0) {
+                snprintf(tmp, sizeof(tmp), "%.*s", precision, sv);
+            } else {
+                snprintf(tmp, sizeof(tmp), "%s", sv);
+            }
+        } else {
+            fprintf(stderr, "str_format: unsupported specifier %%%c\n", *p);
+            exit(1);
+        }
+        int tlen = strlen(tmp);
+        while (len + tlen >= cap) { cap *= 2; buf = realloc(buf, cap); }
+        memcpy(buf + len, tmp, tlen);
+        len += tlen;
+    }
+    buf[len] = '\0';
+    Value result = {TYPE_STRING, (long)buf};
+    return result;
+}
+
 // ===== Misc Helpers =====
 
 static double value_to_double(Value v) {
@@ -1178,8 +1483,39 @@ static double value_to_double(Value v) {
         case TYPE_INT: return (double)v.data;
         case TYPE_FLOAT: return *(double*)&v.data;
         case TYPE_STRING: return atof((char*)v.data);
-        default: return 0.0;
+        default:
+            fprintf(stderr, "Math functions require numeric/string convertible types\n");
+            exit(1);
     }
+}
+
+// Math helpers
+static Value make_float_value(double d) {
+    Value r = {TYPE_FLOAT, *(long*)&d};
+    return r;
+}
+
+Value math_sin(Value a) { return make_float_value(sin(value_to_double(a))); }
+Value math_cos(Value a) { return make_float_value(cos(value_to_double(a))); }
+Value math_asin(Value a) { return make_float_value(asin(value_to_double(a))); }
+Value math_acos(Value a) { return make_float_value(acos(value_to_double(a))); }
+Value math_log(Value a) { return make_float_value(log(value_to_double(a))); }
+Value math_exp(Value a) { return make_float_value(exp(value_to_double(a))); }
+Value math_ceil(Value a) { return make_float_value(ceil(value_to_double(a))); }
+Value math_floor(Value a) { return make_float_value(floor(value_to_double(a))); }
+Value math_round(Value a) { return make_float_value(round(value_to_double(a))); }
+Value math_sqrt(Value a) { return make_float_value(sqrt(value_to_double(a))); }
+Value math_pow_val(Value a, Value b) {
+    return make_float_value(pow(value_to_double(a), value_to_double(b)));
+}
+Value math_random_val(Value a, Value b, int arg_count) {
+    double r = (double)rand() / (double)RAND_MAX;
+    if (arg_count == 2) {
+        double min = value_to_double(a);
+        double max = value_to_double(b);
+        r = min + r * (max - min);
+    }
+    return make_float_value(r);
 }
 
 Value remove_entry(Value obj, Value key_or_index) {
@@ -1337,7 +1673,11 @@ static Value parse_json_string_rt(const char **p) {
         if (idx >= 4095) break;
     }
     buf[idx] = '\0';
-    if (**p == quote) (*p)++;
+    if (**p == quote) {
+        (*p)++;
+    } else {
+        json_error_rt = 1; // unterminated string
+    }
     char *res = strdup(buf);
     Value v = {TYPE_STRING, (long)res};
     return v;
@@ -1428,8 +1768,8 @@ static Value parse_json_value_rt(const char **p) {
     if (c == '[') return parse_json_array_rt(p);
     if (c == '{') return parse_json_object_rt(p);
     if (isdigit((unsigned char)c) || c == '-') return parse_json_number_rt(p);
-    if (match_word_rt(p, "true")) { Value v = {TYPE_INT, 1}; return v; }
-    if (match_word_rt(p, "false")) { Value v = {TYPE_INT, 0}; return v; }
+    if (match_word_rt(p, "true")) { Value v = {TYPE_BOOL, 1}; return v; }
+    if (match_word_rt(p, "false")) { Value v = {TYPE_BOOL, 0}; return v; }
     if (match_word_rt(p, "null")) { Value v = {TYPE_NULL, 0}; return v; }
     json_error_rt = 1;
     Value v = {TYPE_INT, 0};
@@ -1693,7 +2033,7 @@ Value member_get(Value instance, char *name) {
 
     Value key = {TYPE_STRING, (long)name};
     Value has = dict_has(inst->fields, key);
-    if (has.type == TYPE_INT && has.data == 1) {
+    if ((has.type == TYPE_INT || has.type == TYPE_BOOL) && has.data == 1) {
         return dict_get(inst->fields, key);
     }
 
@@ -1766,6 +2106,9 @@ static void print_value_recursive(Value v) {
             printf("%g", *fp);
             break;
         }
+        case TYPE_BOOL:
+            printf("%s", v.data ? "true" : "false");
+            break;
         case TYPE_STRING:
             printf("\"%s\"", (char*)v.data);
             break;
@@ -1822,6 +2165,9 @@ void print_value(Value v) {
                 printf("%g", *fp);
                 break;
             }
+            case TYPE_BOOL:
+                printf("%s", v.data ? "true" : "false");
+                break;
             case TYPE_NULL:
                 printf("null");
                 break;

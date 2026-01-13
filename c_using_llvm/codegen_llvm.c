@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 void llvm_codegen_init(LLVMCodeGen *gen, FILE *out) {
     gen->out = out;
@@ -10,8 +11,13 @@ void llvm_codegen_init(LLVMCodeGen *gen, FILE *out) {
     gen->label_counter = 0;
     gen->string_counter = 0;
     gen->scope_counter = 0;
+    gen->scope_depth = 0;
     gen->strings = NULL;
     gen->var_mappings = NULL;
+    gen->global_vars = NULL;
+    gen->break_label = NULL;
+    gen->continue_label = NULL;
+    gen->functions = NULL;
 }
 
 static void emit_indent(LLVMCodeGen *gen) {
@@ -29,24 +35,50 @@ static char* new_temp(LLVMCodeGen *gen) {
 // Forward declarations
 static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var);
 static void gen_statement(LLVMCodeGen *gen, ASTNode *node);
-static VarMapping* push_scope(LLVMCodeGen *gen) { return gen->var_mappings; }
-static void pop_scope(LLVMCodeGen *gen, VarMapping *saved) { gen->var_mappings = saved; }
+static VarMapping* find_var_mapping_current_scope(LLVMCodeGen *gen, const char *original_name);
+static VarMapping* push_scope(LLVMCodeGen *gen, int *saved_depth) {
+    if (saved_depth) *saved_depth = gen->scope_depth;
+    gen->scope_depth++;
+    return gen->var_mappings;
+}
+static void pop_scope(LLVMCodeGen *gen, VarMapping *saved, int saved_depth) {
+    gen->var_mappings = saved;
+    gen->scope_depth = saved_depth;
+}
 static const char* create_unique_var_name(LLVMCodeGen *gen, const char *original_name, int is_global);
+static void codegen_error(ASTNode *node, const char *fmt, ...) {
+    va_list ap;
+    if (node && node->file) {
+        fprintf(stderr, "Error at %s:%d: ", node->file, node->line);
+    } else {
+        fprintf(stderr, "Error: ");
+    }
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fprintf(stderr, "\n");
+    exit(1);
+}
 
 // Helper to generate field initializer functions
 static void gen_field_init_function(LLVMCodeGen *gen, const char *class_name, ASTNode *member_decl) {
-    VarMapping *saved = push_scope(gen);
+    int saved_depth = 0;
+    VarMapping *saved = push_scope(gen, &saved_depth);
     const char *field_name = member_decl->data.var_decl.name;
     fprintf(gen->out, "define %%Value @__field_init_%s_%s(%%Value %%this) {\n", class_name, field_name);
     gen->indent_level = 1;
 
     const char *this_unique = create_unique_var_name(gen, "this", 0);
+    VarMapping *m_this = find_var_mapping_current_scope(gen, "this");
+    if (m_this) m_this->declared = 1;
     emit_indent(gen);
     fprintf(gen->out, "%%%s = alloca %%Value\n", this_unique);
     emit_indent(gen);
     fprintf(gen->out, "store %%Value %%this, %%Value* %%%s\n", this_unique);
 
     const char *self_unique = create_unique_var_name(gen, "self", 0);
+    VarMapping *m_self = find_var_mapping_current_scope(gen, "self");
+    if (m_self) m_self->declared = 1;
     emit_indent(gen);
     fprintf(gen->out, "%%%s = alloca %%Value\n", self_unique);
     emit_indent(gen);
@@ -60,23 +92,28 @@ static void gen_field_init_function(LLVMCodeGen *gen, const char *class_name, AS
     fprintf(gen->out, "ret %%Value %s\n", val_temp);
     fprintf(gen->out, "}\n\n");
     gen->indent_level = 0;
-    pop_scope(gen, saved);
+    pop_scope(gen, saved, saved_depth);
 }
 
 // Helper to generate method functions with (this, args, arg_count) signature
 static void gen_method_function(LLVMCodeGen *gen, const char *class_name, ASTNode *func_def) {
-    VarMapping *saved = push_scope(gen);
+    int saved_depth = 0;
+    VarMapping *saved = push_scope(gen, &saved_depth);
     fprintf(gen->out, "define %%Value @%s__%s(%%Value %%this, %%Value* %%args, i32 %%arg_count) {\n",
             class_name, func_def->data.func_def.name);
     gen->indent_level = 1;
 
     const char *this_unique = create_unique_var_name(gen, "this", 0);
+    VarMapping *m_this = find_var_mapping_current_scope(gen, "this");
+    if (m_this) m_this->declared = 1;
     emit_indent(gen);
     fprintf(gen->out, "%%%s = alloca %%Value\n", this_unique);
     emit_indent(gen);
     fprintf(gen->out, "store %%Value %%this, %%Value* %%%s\n", this_unique);
 
     const char *self_unique = create_unique_var_name(gen, "self", 0);
+    VarMapping *m_self = find_var_mapping_current_scope(gen, "self");
+    if (m_self) m_self->declared = 1;
     emit_indent(gen);
     fprintf(gen->out, "%%%s = alloca %%Value\n", self_unique);
     emit_indent(gen);
@@ -87,6 +124,8 @@ static void gen_method_function(LLVMCodeGen *gen, const char *class_name, ASTNod
     while (param != NULL) {
         const char *pname = param->node->data.identifier.name;
         const char *unique = create_unique_var_name(gen, pname, 0);
+        VarMapping *pm = find_var_mapping_current_scope(gen, pname);
+        if (pm) pm->declared = 1;
         emit_indent(gen);
         fprintf(gen->out, "%%%s = alloca %%Value\n", unique);
 
@@ -117,12 +156,11 @@ static void gen_method_function(LLVMCodeGen *gen, const char *class_name, ASTNod
     fprintf(gen->out, "ret %%Value { i32 0, i64 0 }\n");
     fprintf(gen->out, "}\n\n");
     gen->indent_level = 0;
-    pop_scope(gen, saved);
+    pop_scope(gen, saved, saved_depth);
 }
 
 // Get unique name for an existing variable (lookup only)
 static VarMapping* find_var_mapping(LLVMCodeGen *gen, const char *original_name) {
-    // Look up in reverse order (most recent first)
     VarMapping *m = gen->var_mappings;
     while (m != NULL) {
         if (strcmp(m->original_name, original_name) == 0) {
@@ -130,8 +168,18 @@ static VarMapping* find_var_mapping(LLVMCodeGen *gen, const char *original_name)
         }
         m = m->next;
     }
+    return NULL;
+}
 
-    // Not found
+// Lookup only within the current lexical scope depth
+static VarMapping* find_var_mapping_current_scope(LLVMCodeGen *gen, const char *original_name) {
+    VarMapping *m = gen->var_mappings;
+    while (m != NULL) {
+        if (m->scope_depth == gen->scope_depth && strcmp(m->original_name, original_name) == 0) {
+            return m;
+        }
+        m = m->next;
+    }
     return NULL;
 }
 
@@ -147,10 +195,61 @@ static const char* create_unique_var_name(LLVMCodeGen *gen, const char *original
         snprintf(new_mapping->unique_name, 256, "%s_%d", original_name, gen->scope_counter++);
     }
     new_mapping->is_global = is_global;
+    new_mapping->scope_depth = gen->scope_depth;
+    new_mapping->declared = 0;
+    new_mapping->next_global = NULL;
     new_mapping->next = gen->var_mappings;
     gen->var_mappings = new_mapping;
+    if (is_global) {
+        new_mapping->next_global = gen->global_vars;
+        gen->global_vars = new_mapping;
+    }
 
     return new_mapping->unique_name;
+}
+
+static FuncInfo* find_function(LLVMCodeGen *gen, const char *name) {
+    FuncInfo *f = gen->functions;
+    while (f) {
+        if (strcmp(f->name, name) == 0) return f;
+        f = f->next;
+    }
+    return NULL;
+}
+
+static void register_function(LLVMCodeGen *gen, const char *name, int arity, const char *file, int line) {
+    if (find_function(gen, name)) {
+        ASTNode dummy = {.file = (char*)file, .line = line};
+        codegen_error(&dummy, "Function '%s' redefined (codegen)", name);
+    }
+    FuncInfo *f = malloc(sizeof(FuncInfo));
+    f->name = strdup(name);
+    f->arity = arity;
+    f->next = gen->functions;
+    gen->functions = f;
+}
+
+// Pre-register globals that live in the top-level (including try/catch blocks which are not new scopes)
+static void preregister_globals_in_list(LLVMCodeGen *gen, ASTNodeList *list, int is_global_scope) {
+    while (list != NULL) {
+        ASTNode *n = list->node;
+        if (is_global_scope && n->type == NODE_VAR_DECL) {
+            if (!find_var_mapping_current_scope(gen, n->data.var_decl.name)) {
+                create_unique_var_name(gen, n->data.var_decl.name, 1);
+            } else {
+                codegen_error(n, "Redefinition of '%s' in the same scope (codegen)", n->data.var_decl.name);
+            }
+        } else if (is_global_scope && n->type == NODE_CLASS_DEF) {
+            if (find_var_mapping_current_scope(gen, n->data.class_def.name)) {
+                codegen_error(n, "Redefinition of class '%s' in the same scope (codegen)", n->data.class_def.name);
+            }
+            create_unique_var_name(gen, n->data.class_def.name, 1);
+        } else if (n->type == NODE_TRY_CATCH) {
+            preregister_globals_in_list(gen, n->data.try_catch.try_block, is_global_scope);
+            preregister_globals_in_list(gen, n->data.try_catch.catch_block, is_global_scope);
+        }
+        list = list->next;
+    }
 }
 
 // Helper to register a string literal and return its global name
@@ -206,6 +305,9 @@ static void emit_string_literals(LLVMCodeGen *gen) {
 // Pre-pass to collect all string literals
 static void collect_strings_expr(LLVMCodeGen *gen, ASTNode *node);
 static void collect_strings_stmt(LLVMCodeGen *gen, ASTNode *node);
+static void register_functions_stmt(LLVMCodeGen *gen, ASTNode *node);
+static void register_file_strings_expr(LLVMCodeGen *gen, ASTNode *node);
+static void register_file_strings_stmt(LLVMCodeGen *gen, ASTNode *node);
 
 static void collect_strings_expr(LLVMCodeGen *gen, ASTNode *node) {
     if (node == NULL) return;
@@ -215,6 +317,7 @@ static void collect_strings_expr(LLVMCodeGen *gen, ASTNode *node) {
             register_string_literal(gen, node->data.string_literal.value);
             break;
         case NODE_BINARY_OP:
+            if (node->file) register_string_literal(gen, node->file);
             collect_strings_expr(gen, node->data.binary_op.left);
             collect_strings_expr(gen, node->data.binary_op.right);
             break;
@@ -280,6 +383,65 @@ static void collect_strings_expr(LLVMCodeGen *gen, ASTNode *node) {
                 collect_strings_expr(gen, arg->node);
                 arg = arg->next;
             }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// Register file path strings for runtime error context
+static void register_file_strings_expr(LLVMCodeGen *gen, ASTNode *node) {
+    if (!node) return;
+    if (node->file) register_string_literal(gen, node->file);
+    switch (node->type) {
+        case NODE_BINARY_OP:
+            register_file_strings_expr(gen, node->data.binary_op.left);
+            register_file_strings_expr(gen, node->data.binary_op.right);
+            break;
+        case NODE_UNARY_OP:
+            register_file_strings_expr(gen, node->data.unary_op.operand);
+            break;
+        case NODE_INDEX_ACCESS:
+            register_file_strings_expr(gen, node->data.index_access.object);
+            register_file_strings_expr(gen, node->data.index_access.index);
+            break;
+        case NODE_SLICE_ACCESS:
+            register_file_strings_expr(gen, node->data.slice_access.object);
+            register_file_strings_expr(gen, node->data.slice_access.start);
+            register_file_strings_expr(gen, node->data.slice_access.end);
+            break;
+        case NODE_ARRAY_LITERAL: {
+            ASTNodeList *e = node->data.array_literal.elements;
+            while (e) { register_file_strings_expr(gen, e->node); e = e->next; }
+            break;
+        }
+        case NODE_DICT_LITERAL: {
+            ASTNodeList *p = node->data.dict_literal.pairs;
+            while (p) {
+                register_file_strings_expr(gen, p->node->data.dict_pair.key);
+                register_file_strings_expr(gen, p->node->data.dict_pair.value);
+                p = p->next;
+            }
+            break;
+        }
+        case NODE_MEMBER_ACCESS:
+            register_file_strings_expr(gen, node->data.member_access.object);
+            break;
+        case NODE_METHOD_CALL: {
+            register_file_strings_expr(gen, node->data.method_call.object);
+            ASTNodeList *a = node->data.method_call.arguments;
+            while (a) { register_file_strings_expr(gen, a->node); a = a->next; }
+            break;
+        }
+        case NODE_FUNC_CALL: {
+            ASTNodeList *a = node->data.func_call.arguments;
+            while (a) { register_file_strings_expr(gen, a->node); a = a->next; }
+            break;
+        }
+        case NODE_NEW_EXPR: {
+            ASTNodeList *a = node->data.new_expr.arguments;
+            while (a) { register_file_strings_expr(gen, a->node); a = a->next; }
             break;
         }
         default:
@@ -405,6 +567,96 @@ static void collect_strings_stmt(LLVMCodeGen *gen, ASTNode *node) {
     }
 }
 
+static void register_file_strings_stmt(LLVMCodeGen *gen, ASTNode *node) {
+    if (!node) return;
+    if (node->file) register_string_literal(gen, node->file);
+    switch (node->type) {
+        case NODE_VAR_DECL:
+            register_file_strings_expr(gen, node->data.var_decl.value);
+            break;
+        case NODE_ASSIGNMENT:
+            register_file_strings_expr(gen, node->data.assignment.target);
+            register_file_strings_expr(gen, node->data.assignment.value);
+            break;
+        case NODE_IF_STMT: {
+            register_file_strings_expr(gen, node->data.if_stmt.condition);
+            ASTNodeList *s = node->data.if_stmt.then_block;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            s = node->data.if_stmt.else_block;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            break;
+        }
+        case NODE_WHILE_STMT: {
+            register_file_strings_expr(gen, node->data.while_stmt.condition);
+            ASTNodeList *s = node->data.while_stmt.body;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            break;
+        }
+        case NODE_FOREACH_STMT: {
+            register_file_strings_expr(gen, node->data.foreach_stmt.collection);
+            ASTNodeList *s = node->data.foreach_stmt.body;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            break;
+        }
+        case NODE_FOR_STMT: {
+            register_file_strings_expr(gen, node->data.for_stmt.start);
+            register_file_strings_expr(gen, node->data.for_stmt.end);
+            ASTNodeList *s = node->data.for_stmt.body;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            break;
+        }
+        case NODE_TRY_CATCH: {
+            ASTNodeList *s = node->data.try_catch.try_block;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            s = node->data.try_catch.catch_block;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            break;
+        }
+        case NODE_FUNC_DEF: {
+            ASTNodeList *s = node->data.func_def.body;
+            while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+            break;
+        }
+        case NODE_CLASS_DEF: {
+            ASTNodeList *m = node->data.class_def.members;
+            while (m) { register_file_strings_expr(gen, m->node->data.var_decl.value); m = m->next; }
+            ASTNodeList *meth = node->data.class_def.methods;
+            while (meth) {
+                ASTNodeList *s = meth->node->data.func_def.body;
+                while (s) { register_file_strings_stmt(gen, s->node); s = s->next; }
+                meth = meth->next;
+            }
+            break;
+        }
+        default:
+            register_file_strings_expr(gen, node);
+            break;
+    }
+}
+
+// Pre-pass to register function arities and detect redefinitions
+static void register_functions_stmt(LLVMCodeGen *gen, ASTNode *node) {
+    if (node == NULL) return;
+    switch (node->type) {
+        case NODE_FUNC_DEF: {
+            int arity = 0;
+            ASTNodeList *p = node->data.func_def.params;
+            while (p) { arity++; p = p->next; }
+            register_function(gen, node->data.func_def.name, arity, node->file, node->line);
+            break;
+        }
+        case NODE_TRY_CATCH: {
+            ASTNodeList *stmt = node->data.try_catch.try_block;
+            while (stmt) { register_functions_stmt(gen, stmt->node); stmt = stmt->next; }
+            stmt = node->data.try_catch.catch_block;
+            while (stmt) { register_functions_stmt(gen, stmt->node); stmt = stmt->next; }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
 static void emit_runtime_decls(LLVMCodeGen *gen) {
     fprintf(gen->out,
         "; Runtime type definition\n"
@@ -418,7 +670,8 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "@TYPE_DICT = constant i32 4\n"
         "@TYPE_CLASS = constant i32 5\n"
         "@TYPE_INSTANCE = constant i32 6\n"
-        "@TYPE_NULL = constant i32 7\n\n"
+        "@TYPE_NULL = constant i32 7\n"
+        "@TYPE_BOOL = constant i32 8\n\n"
 
         "; Operator tags\n"
         "@OP_ADD = constant i32 0\n"
@@ -435,6 +688,7 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
 
         "; String literals\n"
         "@empty_str = private unnamed_addr constant [1 x i8] c\"\\00\", align 1\n\n"
+        "@.str_trim_ws = private unnamed_addr constant [4 x i8] c\" \\09\\0A\\00\", align 1\n\n"
 
         "; Runtime function declarations\n"
         "declare %%Value @make_array()\n"
@@ -452,30 +706,48 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare %%Value @make_null()\n"
         "declare %%Value @slice_access(%%Value, %%Value, %%Value)\n"
         "declare %%Value @input(%%Value)\n"
-        "declare %%Value @read(%%Value)\n"
-        "declare %%Value @write(%%Value, %%Value)\n"
+        "declare %%Value @file_read(%%Value)\n"
+        "declare %%Value @file_write(%%Value, %%Value)\n"
+        "declare %%Value @file_append(%%Value, %%Value)\n"
+        "declare %%Value @file_size(%%Value)\n"
+        "declare %%Value @file_exist(%%Value)\n"
         "declare %%Value @make_dict()\n"
         "declare %%Value @dict_set(%%Value, %%Value, %%Value)\n"
         "declare %%Value @dict_get(%%Value, %%Value)\n"
         "declare %%Value @dict_has(%%Value, %%Value)\n"
         "declare %%Value @dict_keys(%%Value)\n"
         "declare %%Value @keys(%%Value)\n"
-        "declare %%Value @in_operator(%%Value, %%Value)\n"
-        "declare %%Value @binary_op(%%Value, i32, %%Value)\n"
+        "declare %%Value @in_operator(%%Value, %%Value, i32, i8*)\n"
+        "declare %%Value @not_in_operator(%%Value, %%Value, i32, i8*)\n"
+        "declare %%Value @binary_op(%%Value, i32, %%Value, i32, i8*)\n"
         "declare %%Value @regexp_match(%%Value, %%Value)\n"
         "declare %%Value @regexp_find(%%Value, %%Value)\n"
         "declare %%Value @regexp_replace(%%Value, %%Value, %%Value)\n"
         "declare %%Value @str_split(%%Value, %%Value)\n"
         "declare %%Value @str_join(%%Value, %%Value)\n"
+        "declare %%Value @str_trim(%%Value, %%Value)\n"
+        "declare %%Value @str_format(%%Value, %%Value*, i32)\n"
         "declare %%Value @json_encode(%%Value)\n"
         "declare %%Value @json_decode_ctx(%%Value, i32, i8*)\n"
+        "declare %%Value @math_random_val(%%Value, %%Value, i32)\n"
+        "declare void @set_source_ctx(i32, i8*)\n"
+        "declare double @sin(double)\n"
+        "declare double @cos(double)\n"
+        "declare double @asin(double)\n"
+        "declare double @acos(double)\n"
+        "declare double @log(double)\n"
+        "declare double @exp(double)\n"
+        "declare double @ceil(double)\n"
+        "declare double @floor(double)\n"
+        "declare double @round(double)\n"
+        "declare double @sqrt(double)\n"
+        "declare double @pow(double, double)\n"
         "declare i8* @__try_push_buf()\n"
         "declare void @__try_pop()\n"
         "declare void @__raise(%%Value, i32, i8*)\n"
         "declare %%Value @__get_exception()\n"
         "declare i32 @setjmp(i8*)\n"
         "declare %%Value @remove_entry(%%Value, %%Value)\n"
-        "declare %%Value @math_fn(%%Value, %%Value, %%Value, i32)\n"
         "declare %%Value @cmd_args()\n"
         "declare %%Value @make_class(i8*)\n"
         "declare void @class_add_field(%%Value, i8*, %%Value (%%Value)*, i32)\n"
@@ -497,6 +769,13 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "  ret %%Value %%result2\n"
         "}\n\n"
 
+        "define %%Value @make_bool(i1 %%val) {\n"
+        "  %%ext = zext i1 %%val to i64\n"
+        "  %%result = insertvalue %%Value { i32 8, i64 0 }, i32 8, 0\n"
+        "  %%result2 = insertvalue %%Value %%result, i64 %%ext, 1\n"
+        "  ret %%Value %%result2\n"
+        "}\n\n"
+
         "define %%Value @make_float(double %%val) {\n"
         "  %%as_int = bitcast double %%val to i64\n"
         "  %%result = insertvalue %%Value { i32 1, i64 0 }, i32 1, 0\n"
@@ -512,12 +791,36 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "}\n\n"
 
         "define internal i32 @__is_truthy_ir(%%Value %%v) {\n"
+        "entry:\n"
         "  %%type = extractvalue %%Value %%v, 0\n"
         "  %%data = extractvalue %%Value %%v, 1\n"
-        "  %%is_zero = icmp eq i64 %%data, 0\n"
+        "  %%is_null = icmp eq i32 %%type, 7\n"
+        "  br i1 %%is_null, label %%ret_false, label %%check_str\n"
+        "check_str:\n"
+        "  %%is_str = icmp eq i32 %%type, 2\n"
+        "  br i1 %%is_str, label %%len_str, label %%check_arr\n"
+        "len_str:\n"
+        "  %%lstr = call %%Value @len(%%Value %%v)\n"
+        "  %%lsz = extractvalue %%Value %%lstr, 1\n"
+        "  %%lsz_zero = icmp eq i64 %%lsz, 0\n"
+        "  br i1 %%lsz_zero, label %%ret_false, label %%ret_true\n"
+        "check_arr:\n"
+        "  %%is_arr = icmp eq i32 %%type, 3\n"
+        "  %%is_dict = icmp eq i32 %%type, 4\n"
+        "  %%arr_or_dict = or i1 %%is_arr, %%is_dict\n"
+        "  br i1 %%arr_or_dict, label %%len_arr, label %%default_check\n"
+        "len_arr:\n"
+        "  %%larr = call %%Value @len(%%Value %%v)\n"
+        "  %%asz = extractvalue %%Value %%larr, 1\n"
+        "  %%asz_zero = icmp eq i64 %%asz, 0\n"
+        "  br i1 %%asz_zero, label %%ret_false, label %%ret_true\n"
+        "default_check:\n"
         "  %%is_nonzero = icmp ne i64 %%data, 0\n"
-        "  %%result = select i1 %%is_nonzero, i32 1, i32 0\n"
-        "  ret i32 %%result\n"
+        "  br i1 %%is_nonzero, label %%ret_true, label %%ret_false\n"
+        "ret_true:\n"
+        "  ret i32 1\n"
+        "ret_false:\n"
+        "  ret i32 0\n"
         "}\n\n"
 
         "declare i32 @printf(i8*, ...)\n"
@@ -543,9 +846,16 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
             break;
         }
 
+        case NODE_FLOAT_LITERAL: {
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @make_float(double %f)\n",
+                    result_var, node->data.float_literal.value);
+            break;
+        }
+
         case NODE_BOOL_LITERAL: {
             emit_indent(gen);
-            fprintf(gen->out, "%s = call %%Value @make_int(i64 %d)\n",
+            fprintf(gen->out, "%s = call %%Value @make_bool(i1 %d)\n",
                     result_var, node->data.bool_literal.value ? 1 : 0);
             break;
         }
@@ -573,8 +883,7 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
         case NODE_IDENTIFIER: {
             VarMapping *m = find_var_mapping(gen, node->data.identifier.name);
             if (m == NULL) {
-                fprintf(stderr, "Error: Variable '%s' not declared in this scope (codegen)\n", node->data.identifier.name);
-                exit(1);
+                codegen_error(node, "Variable '%s' not declared in this scope (codegen)", node->data.identifier.name);
             }
             emit_indent(gen);
             if (m->is_global) {
@@ -613,11 +922,40 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
             gen_expr(gen, node->data.binary_op.left, left_temp);
             gen_expr(gen, node->data.binary_op.right, right_temp);
 
-            // Special handling for IN operator
+            const char *file_global = register_string_literal(gen, node->file ? node->file : "<input>");
+            int flen = strlen(node->file ? node->file : "<input>") + 1;
+            char file_ptr[32];
+            snprintf(file_ptr, sizeof(file_ptr), "%%t%d", gen->temp_counter++);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = getelementptr inbounds [%d x i8], [%d x i8]* %s, i64 0, i64 0\n",
+                    file_ptr, flen, flen, file_global);
+
+            // Special handling for IN / NOT_IN operators
             if (node->data.binary_op.op == OP_IN) {
                 emit_indent(gen);
-                fprintf(gen->out, "%s = call %%Value @in_operator(%%Value %s, %%Value %s)\n",
-                        result_var, left_temp, right_temp);
+                fprintf(gen->out, "%s = call %%Value @in_operator(%%Value %s, %%Value %s, i32 %d, i8* %s)\n",
+                        result_var, left_temp, right_temp, node->line, file_ptr);
+                break;
+            } else if (node->data.binary_op.op == OP_NOT_IN) {
+                char in_tmp[32], truthy[32], cmp[32], bool_int[32], base_val[32];
+                snprintf(in_tmp, sizeof(in_tmp), "%%t%d", gen->temp_counter++);
+                snprintf(truthy, sizeof(truthy), "%%t%d", gen->temp_counter++);
+                snprintf(cmp, sizeof(cmp), "%%t%d", gen->temp_counter++);
+                snprintf(bool_int, sizeof(bool_int), "%%t%d", gen->temp_counter++);
+                snprintf(base_val, sizeof(base_val), "%%t%d", gen->temp_counter++);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @in_operator(%%Value %s, %%Value %s, i32 %d, i8* %s)\n",
+                        in_tmp, left_temp, right_temp, node->line, file_ptr);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call i32 @__is_truthy_ir(%%Value %s)\n", truthy, in_tmp);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = icmp eq i32 %s, 0\n", cmp, truthy);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = zext i1 %s to i64\n", bool_int, cmp);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = insertvalue %%Value { i32 0, i64 0 }, i32 0, 0\n", base_val);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = insertvalue %%Value %s, i64 %s, 1\n", result_var, base_val, bool_int);
                 break;
             }
 
@@ -640,8 +978,8 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
             }
 
             emit_indent(gen);
-            fprintf(gen->out, "%s = call %%Value @binary_op(%%Value %s, i32 %d, %%Value %s)\n",
-                    result_var, left_temp, op_code, right_temp);
+            fprintf(gen->out, "%s = call %%Value @binary_op(%%Value %s, i32 %d, %%Value %s, i32 %d, i8* %s)\n",
+                    result_var, left_temp, op_code, right_temp, node->line, file_ptr);
             break;
         }
 
@@ -888,24 +1226,21 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", result_var);
             } else if (strcmp(node->data.func_call.name, "remove") == 0) {
                 if (arg_count != 2) {
-                    fprintf(stderr, "remove() requires 2 arguments\n");
-                    exit(1);
+                    codegen_error(node, "remove() requires 2 arguments");
                 }
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @remove_entry(%%Value %s, %%Value %s)\n",
                         result_var, arg_temps[0], arg_temps[1]);
             } else if (strcmp(node->data.func_call.name, "json_encode") == 0) {
                 if (arg_count != 1) {
-                    fprintf(stderr, "json_encode() requires 1 argument\n");
-                    exit(1);
+                    codegen_error(node, "json_encode() requires 1 argument");
                 }
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @json_encode(%%Value %s)\n",
                         result_var, arg_temps[0]);
             } else if (strcmp(node->data.func_call.name, "json_decode") == 0) {
                 if (arg_count != 1) {
-                    fprintf(stderr, "json_decode() requires 1 argument\n");
-                    exit(1);
+                    codegen_error(node, "json_decode() requires 1 argument");
                 }
                 const char *file_global = register_string_literal(gen, node->file ? node->file : "<input>");
                 int flen = strlen(node->file ? node->file : "<input>") + 1;
@@ -917,24 +1252,141 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @json_decode_ctx(%%Value %s, i32 %d, i8* %s)\n",
                         result_var, arg_temps[0], node->line, file_ptr);
-            } else if (strcmp(node->data.func_call.name, "math") == 0) {
-                if (arg_count < 1) {
-                    fprintf(stderr, "math() requires at least operation name\n");
-                    exit(1);
+            } else if (strcmp(node->data.func_call.name, "str_format") == 0) {
+                if (arg_count < 1) { codegen_error(node, "str_format requires at least format"); }
+                int fmt_args = arg_count - 1;
+                char args_alloca[32];
+                snprintf(args_alloca, sizeof(args_alloca), "%%t%d", gen->temp_counter++);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = alloca [%d x %%Value]\n", args_alloca, fmt_args > 0 ? fmt_args : 1);
+                for (int i = 0; i < fmt_args; i++) {
+                    char arg_ptr[32];
+                    snprintf(arg_ptr, sizeof(arg_ptr), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = getelementptr [%d x %%Value], [%d x %%Value]* %s, i32 0, i32 %d\n",
+                            arg_ptr, fmt_args > 0 ? fmt_args : 1, fmt_args > 0 ? fmt_args : 1, args_alloca, i);
+                    emit_indent(gen);
+                    fprintf(gen->out, "store %%Value %s, %%Value* %s\n", arg_temps[i+1], arg_ptr);
                 }
-                int extra_args = arg_count - 1;
-                char zero_val[32];
-                snprintf(zero_val, sizeof(zero_val), "%%t%d", gen->temp_counter++);
+                char args_base[32];
+                snprintf(args_base, sizeof(args_base), "%%t%d", gen->temp_counter++);
                 emit_indent(gen);
-                fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", zero_val);
-
-                const char *arg1 = extra_args >= 1 ? arg_temps[1] : zero_val;
-                const char *arg2 = extra_args >= 2 ? arg_temps[2] : zero_val;
-
+                fprintf(gen->out, "%s = getelementptr [%d x %%Value], [%d x %%Value]* %s, i32 0, i32 0\n",
+                        args_base, fmt_args > 0 ? fmt_args : 1, fmt_args > 0 ? fmt_args : 1, args_alloca);
                 emit_indent(gen);
-                fprintf(gen->out, "%s = call %%Value @math_fn(%%Value %s, %%Value %s, %%Value %s, i32 %d)\n",
-                        result_var, arg_temps[0], arg1, arg2, extra_args);
+                fprintf(gen->out, "%s = call %%Value @str_format(%%Value %s, %%Value* %s, i32 %d)\n",
+                        result_var, arg_temps[0], args_base, fmt_args);
             } else {
+                int handled_math = 0;
+                const char *fname = node->data.func_call.name;
+                if (strcmp(fname, "round") == 0 && arg_count == 2) {
+                    char v_f[32], v_bits[32], v_d[32];
+                    char d_f[32], d_bits[32], d_d[32];
+                    char scale[32], mul[32], rnd[32], res[32];
+                    snprintf(v_f, sizeof(v_f), "%%t%d", gen->temp_counter++);
+                    snprintf(v_bits, sizeof(v_bits), "%%t%d", gen->temp_counter++);
+                    snprintf(v_d, sizeof(v_d), "%%t%d", gen->temp_counter++);
+                    snprintf(d_f, sizeof(d_f), "%%t%d", gen->temp_counter++);
+                    snprintf(d_bits, sizeof(d_bits), "%%t%d", gen->temp_counter++);
+                    snprintf(d_d, sizeof(d_d), "%%t%d", gen->temp_counter++);
+                    snprintf(scale, sizeof(scale), "%%t%d", gen->temp_counter++);
+                    snprintf(mul, sizeof(mul), "%%t%d", gen->temp_counter++);
+                    snprintf(rnd, sizeof(rnd), "%%t%d", gen->temp_counter++);
+                    snprintf(res, sizeof(res), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @to_float(%%Value %s)\n", v_f, arg_temps[0]);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", v_bits, v_f);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = bitcast i64 %s to double\n", v_d, v_bits);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @to_float(%%Value %s)\n", d_f, arg_temps[1]);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", d_bits, d_f);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = bitcast i64 %s to double\n", d_d, d_bits);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call double @pow(double 1.000000e+01, double %s)\n", scale, d_d);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = fmul double %s, %s\n", mul, v_d, scale);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call double @round(double %s)\n", rnd, mul);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = fdiv double %s, %s\n", res, rnd, scale);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @make_float(double %s)\n", result_var, res);
+                    handled_math = 1;
+                } else if (
+                    strcmp(fname, "sin") == 0 || strcmp(fname, "cos") == 0 ||
+                    strcmp(fname, "asin") == 0 || strcmp(fname, "acos") == 0 ||
+                    strcmp(fname, "log") == 0 || strcmp(fname, "exp") == 0 ||
+                    strcmp(fname, "ceil") == 0 || strcmp(fname, "floor") == 0 ||
+                    strcmp(fname, "sqrt") == 0 ||
+                    strcmp(fname, "round") == 0
+                ) {
+                    if (arg_count != 1) {
+                        codegen_error(node, "%s() requires 1 argument", fname);
+                    }
+                    char fval[32], bits[32], dval[32], mres[32];
+                    snprintf(fval, sizeof(fval), "%%t%d", gen->temp_counter++);
+                    snprintf(bits, sizeof(bits), "%%t%d", gen->temp_counter++);
+                    snprintf(dval, sizeof(dval), "%%t%d", gen->temp_counter++);
+                    snprintf(mres, sizeof(mres), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @to_float(%%Value %s)\n", fval, arg_temps[0]);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", bits, fval);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = bitcast i64 %s to double\n", dval, bits);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call double @%s(double %s)\n", mres, fname, dval);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @make_float(double %s)\n", result_var, mres);
+                    handled_math = 1;
+                } else if (strcmp(fname, "pow") == 0) {
+                    if (arg_count != 2) {
+                        codegen_error(node, "pow() requires 2 arguments");
+                    }
+                    char a_val[32], a_bits[32], a_d[32];
+                    char b_val[32], b_bits[32], b_d[32];
+                    char mres[32];
+                    snprintf(a_val, sizeof(a_val), "%%t%d", gen->temp_counter++);
+                    snprintf(a_bits, sizeof(a_bits), "%%t%d", gen->temp_counter++);
+                    snprintf(a_d, sizeof(a_d), "%%t%d", gen->temp_counter++);
+                    snprintf(b_val, sizeof(b_val), "%%t%d", gen->temp_counter++);
+                    snprintf(b_bits, sizeof(b_bits), "%%t%d", gen->temp_counter++);
+                    snprintf(b_d, sizeof(b_d), "%%t%d", gen->temp_counter++);
+                    snprintf(mres, sizeof(mres), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @to_float(%%Value %s)\n", a_val, arg_temps[0]);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", a_bits, a_val);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = bitcast i64 %s to double\n", a_d, a_bits);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @to_float(%%Value %s)\n", b_val, arg_temps[1]);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", b_bits, b_val);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = bitcast i64 %s to double\n", b_d, b_bits);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call double @pow(double %s, double %s)\n", mres, a_d, b_d);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @make_float(double %s)\n", result_var, mres);
+                    handled_math = 1;
+                }
+
+                if (handled_math) {
+                    for (int i = 0; i < arg_count; i++) free(arg_temps[i]);
+                    free(arg_temps);
+                    break;
+                }
+
+                FuncInfo *fi = find_function(gen, fname);
+                if (fi && arg_count != fi->arity) {
+                    codegen_error(node, "Function '%s' expects %d args but got %d (codegen)", fname, fi->arity, arg_count);
+                }
+
                 // Map builtin function names to runtime function names
                 const char *runtime_name = node->data.func_call.name;
                 if (strcmp(node->data.func_call.name, "int") == 0) {
@@ -942,13 +1394,52 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 } else if (strcmp(node->data.func_call.name, "float") == 0) {
                     runtime_name = "to_float";
                 }
+                else if (strcmp(runtime_name, "read") == 0) runtime_name = "file_read";
+                else if (strcmp(runtime_name, "write") == 0) runtime_name = "file_write";
+                else if (strcmp(runtime_name, "file_read") == 0) runtime_name = "file_read";
+                else if (strcmp(runtime_name, "file_write") == 0) runtime_name = "file_write";
+                else if (strcmp(runtime_name, "file_append") == 0) runtime_name = "file_append";
+                else if (strcmp(runtime_name, "file_size") == 0) runtime_name = "file_size";
+                else if (strcmp(runtime_name, "file_exist") == 0) runtime_name = "file_exist";
+                else if (strcmp(runtime_name, "str_trim") == 0) runtime_name = "str_trim";
+                else if (strcmp(runtime_name, "random") == 0) runtime_name = "math_random_val";
 
                 // User function call
+                char rnd_zero1[32] = {0}, rnd_zero2[32] = {0};
+                if (strcmp(runtime_name, "math_random_val") == 0 && arg_count == 0) {
+                    snprintf(rnd_zero1, sizeof(rnd_zero1), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", rnd_zero1);
+                    snprintf(rnd_zero2, sizeof(rnd_zero2), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", rnd_zero2);
+                }
+
+                if (strcmp(runtime_name, "str_trim") == 0 && arg_count == 1) {
+                    char defptr[32], defval[32];
+                    snprintf(defptr, sizeof(defptr), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = getelementptr inbounds [4 x i8], [4 x i8]* @.str_trim_ws, i64 0, i64 0\n", defptr);
+                    snprintf(defval, sizeof(defval), "%%t%d", gen->temp_counter++);
+                    emit_indent(gen);
+                    fprintf(gen->out, "%s = call %%Value @make_string(i8* %s)\n", defval, defptr);
+                    arg_temps = realloc(arg_temps, 2 * sizeof(char*));
+                    arg_temps[1] = strdup(defval);
+                    arg_count = 2;
+                }
+
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @%s(", result_var, runtime_name);
-                for (int i = 0; i < arg_count; i++) {
-                    if (i > 0) fprintf(gen->out, ", ");
-                    fprintf(gen->out, "%%Value %s", arg_temps[i]);
+                if (strcmp(runtime_name, "math_random_val") == 0 && arg_count == 0) {
+                    fprintf(gen->out, "%%Value %s, %%Value %s, i32 0", rnd_zero1, rnd_zero2);
+                } else {
+                    for (int i = 0; i < arg_count; i++) {
+                        if (i > 0) fprintf(gen->out, ", ");
+                        fprintf(gen->out, "%%Value %s", arg_temps[i]);
+                    }
+                    if (strcmp(runtime_name, "math_random_val") == 0) {
+                        fprintf(gen->out, ", i32 %d", arg_count);
+                    }
                 }
                 fprintf(gen->out, ")\n");
             }
@@ -1076,25 +1567,30 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
 static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
     switch (node->type) {
         case NODE_VAR_DECL: {
-            VarMapping *m = find_var_mapping(gen, node->data.var_decl.name);
+            VarMapping *m_current = find_var_mapping_current_scope(gen, node->data.var_decl.name);
+            VarMapping *m = m_current ? m_current : find_var_mapping(gen, node->data.var_decl.name);
+            if (m_current && m_current->declared) {
+                codegen_error(node, "Redefinition of '%s' in the same scope (codegen)", node->data.var_decl.name);
+            }
             // Evaluate initial value
             char val_temp[32];
             snprintf(val_temp, sizeof(val_temp), "%%t%d", gen->temp_counter++);
             gen_expr(gen, node->data.var_decl.value, val_temp);
 
+            if (!m_current) {
+                int is_global_decl = (gen->scope_depth == 0);
+                create_unique_var_name(gen, node->data.var_decl.name, is_global_decl);
+                m = find_var_mapping(gen, node->data.var_decl.name);
+                if (!m->is_global) {
+                    emit_indent(gen);
+                    fprintf(gen->out, "%%%s = alloca %%Value\n", m->unique_name);
+                }
+            }
+            if (m) m->declared = 1;
+            emit_indent(gen);
             if (m && m->is_global) {
-                emit_indent(gen);
                 fprintf(gen->out, "store %%Value %s, %%Value* @%s\n", val_temp, m->unique_name);
             } else {
-                // Create unique name for this new variable declaration if not already present
-                if (!m) {
-                    create_unique_var_name(gen, node->data.var_decl.name, 0);
-                    m = find_var_mapping(gen, node->data.var_decl.name);
-                }
-                // Allocate space on stack
-                emit_indent(gen);
-                fprintf(gen->out, "%%%s = alloca %%Value\n", m->unique_name);
-                emit_indent(gen);
                 fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n",
                         val_temp, m->unique_name);
             }
@@ -1111,9 +1607,8 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             if (node->data.assignment.target->type == NODE_IDENTIFIER) {
                 VarMapping *m = find_var_mapping(gen, node->data.assignment.target->data.identifier.name);
                 if (m == NULL) {
-                    fprintf(stderr, "Error: Variable '%s' not declared in this scope (codegen)\n",
-                            node->data.assignment.target->data.identifier.name);
-                    exit(1);
+                    codegen_error(node, "Variable '%s' not declared in this scope (codegen)",
+                                  node->data.assignment.target->data.identifier.name);
                 }
                 emit_indent(gen);
                 if (m && m->is_global) {
@@ -1159,10 +1654,24 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
         }
 
         case NODE_CLASS_DEF: {
-            // Allocate storage for class value
-            const char *unique_name = create_unique_var_name(gen, node->data.class_def.name, 0);
-            emit_indent(gen);
-            fprintf(gen->out, "%%%s = alloca %%Value\n", unique_name);
+            VarMapping *m_current = find_var_mapping_current_scope(gen, node->data.class_def.name);
+            if (m_current && m_current->declared) {
+                codegen_error(node, "Redefinition of class '%s' in the same scope (codegen)", node->data.class_def.name);
+            }
+            if (!m_current) {
+                int is_global_decl = (gen->scope_depth == 0);
+                create_unique_var_name(gen, node->data.class_def.name, is_global_decl);
+                m_current = find_var_mapping_current_scope(gen, node->data.class_def.name);
+            }
+            if (m_current) m_current->declared = 1;
+            const char *unique_name = m_current ? m_current->unique_name : node->data.class_def.name;
+            int is_global = (m_current && m_current->is_global);
+
+            // Allocate storage for class value if needed
+            if (!is_global) {
+                emit_indent(gen);
+                fprintf(gen->out, "%%%s = alloca %%Value\n", unique_name);
+            }
 
             // Class name string
             const char *class_global = register_string_literal(gen, node->data.class_def.name);
@@ -1178,7 +1687,7 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             emit_indent(gen);
             fprintf(gen->out, "%s = call %%Value @make_class(i8* %s)\n", class_val, name_ptr);
             emit_indent(gen);
-            fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n", class_val, unique_name);
+            fprintf(gen->out, "store %%Value %s, %%Value* %s%s\n", class_val, is_global ? "@" : "%", unique_name);
 
             // Register fields
             ASTNodeList *member = node->data.class_def.members;
@@ -1195,7 +1704,7 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 char cls_load[32];
                 snprintf(cls_load, sizeof(cls_load), "%%t%d", gen->temp_counter++);
                 emit_indent(gen);
-                fprintf(gen->out, "%s = load %%Value, %%Value* %%%s\n", cls_load, unique_name);
+                fprintf(gen->out, "%s = load %%Value, %%Value* %s%s\n", cls_load, is_global ? "@" : "%", unique_name);
 
                 int is_private = field_name[0] == '_' ? 1 : 0;
                 emit_indent(gen);
@@ -1228,7 +1737,7 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 char cls_load2[32];
                 snprintf(cls_load2, sizeof(cls_load2), "%%t%d", gen->temp_counter++);
                 emit_indent(gen);
-                fprintf(gen->out, "%s = load %%Value, %%Value* %%%s\n", cls_load2, unique_name);
+                fprintf(gen->out, "%s = load %%Value, %%Value* %s%s\n", cls_load2, is_global ? "@" : "%", unique_name);
 
                 emit_indent(gen);
                 fprintf(gen->out, "call void @class_add_method(%%Value %s, i8* %s, %%Value (%%Value, %%Value*, i32)* @%s__%s, i32 %d, i32 %d)\n",
@@ -1276,13 +1785,14 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             // Then block
             fprintf(gen->out, "\n%s:\n", then_label);
             gen->indent_level++;
-            VarMapping *then_scope = push_scope(gen);
+            int saved_then_depth = 0;
+            VarMapping *then_scope = push_scope(gen, &saved_then_depth);
             ASTNodeList *stmt = node->data.if_stmt.then_block;
             while (stmt != NULL) {
                 gen_statement(gen, stmt->node);
                 stmt = stmt->next;
             }
-            pop_scope(gen, then_scope);
+            pop_scope(gen, then_scope, saved_then_depth);
             emit_indent(gen);
             fprintf(gen->out, "br label %%%s\n", end_label);
             gen->indent_level--;
@@ -1291,13 +1801,14 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             if (node->data.if_stmt.else_block) {
                 fprintf(gen->out, "\n%s:\n", else_label);
                 gen->indent_level++;
-                VarMapping *else_scope = push_scope(gen);
+                int saved_else_depth = 0;
+                VarMapping *else_scope = push_scope(gen, &saved_else_depth);
                 stmt = node->data.if_stmt.else_block;
                 while (stmt != NULL) {
                     gen_statement(gen, stmt->node);
                     stmt = stmt->next;
                 }
-                pop_scope(gen, else_scope);
+                pop_scope(gen, else_scope, saved_else_depth);
                 emit_indent(gen);
                 fprintf(gen->out, "br label %%%s\n", end_label);
                 gen->indent_level--;
@@ -1312,6 +1823,11 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             snprintf(cond_label, sizeof(cond_label), "label%d", gen->label_counter++);
             snprintf(body_label, sizeof(body_label), "label%d", gen->label_counter++);
             snprintf(end_label, sizeof(end_label), "label%d", gen->label_counter++);
+
+            char *prev_break = gen->break_label;
+            char *prev_continue = gen->continue_label;
+            gen->break_label = strdup(end_label);
+            gen->continue_label = strdup(cond_label);
 
             emit_indent(gen);
             fprintf(gen->out, "br label %%%s\n", cond_label);
@@ -1340,22 +1856,172 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             // Loop body
             fprintf(gen->out, "\n%s:\n", body_label);
             gen->indent_level++;
-            VarMapping *body_scope = push_scope(gen);
+            int saved_body_depth = 0;
+            VarMapping *body_scope = push_scope(gen, &saved_body_depth);
             ASTNodeList *stmt = node->data.while_stmt.body;
             while (stmt != NULL) {
                 gen_statement(gen, stmt->node);
                 stmt = stmt->next;
             }
-            pop_scope(gen, body_scope);
+            pop_scope(gen, body_scope, saved_body_depth);
             emit_indent(gen);
             fprintf(gen->out, "br label %%%s\n", cond_label);
             gen->indent_level--;
 
             fprintf(gen->out, "\n%s:\n", end_label);
+            gen->break_label = prev_break;
+            gen->continue_label = prev_continue;
+            break;
+        }
+
+        case NODE_BREAK: {
+            if (!gen->break_label) {
+                codegen_error(node, "break used outside of loop (codegen)");
+            }
+            emit_indent(gen);
+            fprintf(gen->out, "br label %%%s\n", gen->break_label);
+            break;
+        }
+
+        case NODE_CONTINUE: {
+            if (!gen->continue_label) {
+                codegen_error(node, "continue used outside of loop (codegen)");
+            }
+            emit_indent(gen);
+            fprintf(gen->out, "br label %%%s\n", gen->continue_label);
+            break;
+        }
+
+        case NODE_FOR_STMT: {
+            int saved_for_depth = 0;
+            VarMapping *for_scope = push_scope(gen, &saved_for_depth);
+
+            char start_val[32], end_val[32];
+            char start_int[32], end_int[32];
+            char start_i64[32], end_i64[32];
+            snprintf(start_val, sizeof(start_val), "%%t%d", gen->temp_counter++);
+            snprintf(end_val, sizeof(end_val), "%%t%d", gen->temp_counter++);
+            snprintf(start_int, sizeof(start_int), "%%t%d", gen->temp_counter++);
+            snprintf(end_int, sizeof(end_int), "%%t%d", gen->temp_counter++);
+            snprintf(start_i64, sizeof(start_i64), "%%t%d", gen->temp_counter++);
+            snprintf(end_i64, sizeof(end_i64), "%%t%d", gen->temp_counter++);
+            gen_expr(gen, node->data.for_stmt.start, start_val);
+            gen_expr(gen, node->data.for_stmt.end, end_val);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @to_int(%%Value %s)\n", start_int, start_val);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @to_int(%%Value %s)\n", end_int, end_val);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", start_i64, start_int);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", end_i64, end_int);
+
+            char step_pos[32], step_val[32];
+            snprintf(step_pos, sizeof(step_pos), "%%t%d", gen->temp_counter++);
+            snprintf(step_val, sizeof(step_val), "%%t%d", gen->temp_counter++);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = icmp sle i64 %s, %s\n", step_pos, start_i64, end_i64);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = select i1 %s, i64 1, i64 -1\n", step_val, step_pos);
+
+            const char *idx_unique = create_unique_var_name(gen, node->data.for_stmt.index_var, 0);
+            VarMapping *idx_map = find_var_mapping_current_scope(gen, node->data.for_stmt.index_var);
+            if (idx_map) idx_map->declared = 1;
+            emit_indent(gen);
+            fprintf(gen->out, "%%%s = alloca %%Value\n", idx_unique);
+            char init_val[32];
+            snprintf(init_val, sizeof(init_val), "%%t%d", gen->temp_counter++);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @make_int(i64 %s)\n", init_val, start_i64);
+            emit_indent(gen);
+            fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n", init_val, idx_unique);
+
+            char cond_label[32], body_label[32], incr_label[32], end_label[32];
+            snprintf(cond_label, sizeof(cond_label), "label%d", gen->label_counter++);
+            snprintf(body_label, sizeof(body_label), "label%d", gen->label_counter++);
+            snprintf(incr_label, sizeof(incr_label), "label%d", gen->label_counter++);
+            snprintf(end_label, sizeof(end_label), "label%d", gen->label_counter++);
+
+            char *prev_break = gen->break_label;
+            char *prev_continue = gen->continue_label;
+            gen->break_label = strdup(end_label);
+            gen->continue_label = strdup(incr_label);
+
+            emit_indent(gen);
+            fprintf(gen->out, "br label %%%s\n", cond_label);
+
+            // Condition
+            fprintf(gen->out, "\n%s:\n", cond_label);
+            gen->indent_level++;
+            char idx_load[32], idx_i64[32], cmp_le[32], cmp_ge[32], cmp_sel[32];
+            snprintf(idx_load, sizeof(idx_load), "%%t%d", gen->temp_counter++);
+            snprintf(idx_i64, sizeof(idx_i64), "%%t%d", gen->temp_counter++);
+            snprintf(cmp_le, sizeof(cmp_le), "%%t%d", gen->temp_counter++);
+            snprintf(cmp_ge, sizeof(cmp_ge), "%%t%d", gen->temp_counter++);
+            snprintf(cmp_sel, sizeof(cmp_sel), "%%t%d", gen->temp_counter++);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = load %%Value, %%Value* %%%s\n", idx_load, idx_unique);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", idx_i64, idx_load);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = icmp sle i64 %s, %s\n", cmp_le, idx_i64, end_i64);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = icmp sge i64 %s, %s\n", cmp_ge, idx_i64, end_i64);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = select i1 %s, i1 %s, i1 %s\n", cmp_sel, step_pos, cmp_le, cmp_ge);
+            emit_indent(gen);
+            fprintf(gen->out, "br i1 %s, label %%%s, label %%%s\n", cmp_sel, body_label, end_label);
+            gen->indent_level--;
+
+            // Body
+            fprintf(gen->out, "\n%s:\n", body_label);
+            gen->indent_level++;
+            {
+                int saved_body_depth = 0;
+                VarMapping *body_scope = push_scope(gen, &saved_body_depth);
+                ASTNodeList *stmt = node->data.for_stmt.body;
+                while (stmt != NULL) {
+                    gen_statement(gen, stmt->node);
+                    stmt = stmt->next;
+                }
+                pop_scope(gen, body_scope, saved_body_depth);
+            }
+            emit_indent(gen);
+            fprintf(gen->out, "br label %%%s\n", incr_label);
+            gen->indent_level--;
+
+            // Increment
+            fprintf(gen->out, "\n%s:\n", incr_label);
+            gen->indent_level++;
+            char idx_load2[32], idx_i64_2[32], next_i64[32], next_val[32];
+            snprintf(idx_load2, sizeof(idx_load2), "%%t%d", gen->temp_counter++);
+            snprintf(idx_i64_2, sizeof(idx_i64_2), "%%t%d", gen->temp_counter++);
+            snprintf(next_i64, sizeof(next_i64), "%%t%d", gen->temp_counter++);
+            snprintf(next_val, sizeof(next_val), "%%t%d", gen->temp_counter++);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = load %%Value, %%Value* %%%s\n", idx_load2, idx_unique);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = extractvalue %%Value %s, 1\n", idx_i64_2, idx_load2);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = add i64 %s, %s\n", next_i64, idx_i64_2, step_val);
+            emit_indent(gen);
+            fprintf(gen->out, "%s = call %%Value @make_int(i64 %s)\n", next_val, next_i64);
+            emit_indent(gen);
+            fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n", next_val, idx_unique);
+            emit_indent(gen);
+            fprintf(gen->out, "br label %%%s\n", cond_label);
+            gen->indent_level--;
+
+            fprintf(gen->out, "\n%s:\n", end_label);
+            pop_scope(gen, for_scope, saved_for_depth);
+            gen->break_label = prev_break;
+            gen->continue_label = prev_continue;
             break;
         }
 
         case NODE_FOREACH_STMT: {
+            int saved_foreach_depth = 0;
+            VarMapping *saved_foreach_scope = push_scope(gen, &saved_foreach_depth);
             // Generate foreach loop for arrays and dicts
             char collection_temp[32], type_temp[32], type_field_temp[32];
             snprintf(collection_temp, sizeof(collection_temp), "%%t%d", gen->temp_counter++);
@@ -1384,6 +2050,8 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             fprintf(gen->out, "\n%s:\n", array_label);
             gen->indent_level++;
             {
+                char *prev_break = gen->break_label;
+                char *prev_continue = gen->continue_label;
                 char len_temp[32], i_ptr[32];
                 snprintf(len_temp, sizeof(len_temp), "%%t%d", gen->temp_counter++);
                 snprintf(i_ptr, sizeof(i_ptr), "%%t%d", gen->temp_counter++);
@@ -1395,6 +2063,10 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 // Allocate loop variables with unique names (these are new declarations)
                 const char *key_var = create_unique_var_name(gen, node->data.foreach_stmt.key_var, 0);
                 const char *value_var = create_unique_var_name(gen, node->data.foreach_stmt.value_var, 0);
+                VarMapping *kvm = find_var_mapping_current_scope(gen, node->data.foreach_stmt.key_var);
+                VarMapping *vvm = find_var_mapping_current_scope(gen, node->data.foreach_stmt.value_var);
+                if (kvm) kvm->declared = 1;
+                if (vvm) vvm->declared = 1;
 
                 emit_indent(gen);
                 fprintf(gen->out, "%%%s = alloca %%Value\n", key_var);
@@ -1412,6 +2084,9 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 snprintf(loop_body, sizeof(loop_body), "label%d", gen->label_counter++);
                 snprintf(loop_incr, sizeof(loop_incr), "label%d", gen->label_counter++);
                 snprintf(loop_end, sizeof(loop_end), "label%d", gen->label_counter++);
+
+                gen->break_label = strdup(end_label);
+                gen->continue_label = strdup(loop_incr);
 
                 emit_indent(gen);
                 fprintf(gen->out, "br label %%%s\n", loop_cond);
@@ -1498,6 +2173,8 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 fprintf(gen->out, "\n%s:\n", loop_end);
                 emit_indent(gen);
                 fprintf(gen->out, "br label %%%s\n", end_label);
+                gen->break_label = prev_break;
+                gen->continue_label = prev_continue;
             }
             gen->indent_level--;
 
@@ -1505,6 +2182,8 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             fprintf(gen->out, "\n%s:\n", dict_label);
             gen->indent_level++;
             {
+                char *prev_break = gen->break_label;
+                char *prev_continue = gen->continue_label;
                 // keys_arr = keys(collection)
                 char keys_val[32];
                 snprintf(keys_val, sizeof(keys_val), "%%t%d", gen->temp_counter++);
@@ -1519,6 +2198,10 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
 
                 const char *key_var = create_unique_var_name(gen, node->data.foreach_stmt.key_var, 0);
                 const char *value_var = create_unique_var_name(gen, node->data.foreach_stmt.value_var, 0);
+                VarMapping *kvm = find_var_mapping_current_scope(gen, node->data.foreach_stmt.key_var);
+                VarMapping *vvm = find_var_mapping_current_scope(gen, node->data.foreach_stmt.value_var);
+                if (kvm) kvm->declared = 1;
+                if (vvm) vvm->declared = 1;
                 emit_indent(gen);
                 fprintf(gen->out, "%%%s = alloca %%Value\n", key_var);
                 emit_indent(gen);
@@ -1536,6 +2219,9 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 snprintf(loop_body, sizeof(loop_body), "label%d", gen->label_counter++);
                 snprintf(loop_incr, sizeof(loop_incr), "label%d", gen->label_counter++);
                 snprintf(loop_end, sizeof(loop_end), "label%d", gen->label_counter++);
+
+                gen->break_label = strdup(end_label);
+                gen->continue_label = strdup(loop_incr);
 
                 emit_indent(gen);
                 fprintf(gen->out, "br label %%%s\n", loop_cond);
@@ -1608,10 +2294,13 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 fprintf(gen->out, "\n%s:\n", loop_end);
                 emit_indent(gen);
                 fprintf(gen->out, "br label %%%s\n", end_label);
+                gen->break_label = prev_break;
+                gen->continue_label = prev_continue;
             }
             gen->indent_level--;
 
             fprintf(gen->out, "\n%s:\n", end_label);
+            pop_scope(gen, saved_foreach_scope, saved_foreach_depth);
             break;
         }
 
@@ -1657,6 +2346,8 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             gen->indent_level++;
             {
                 const char *catch_var = create_unique_var_name(gen, node->data.try_catch.catch_var, 0);
+                VarMapping *cm = find_var_mapping_current_scope(gen, node->data.try_catch.catch_var);
+                if (cm) cm->declared = 1;
                 emit_indent(gen);
                 fprintf(gen->out, "%%%s = alloca %%Value\n", catch_var);
                 char exc_tmp[32];
@@ -1823,7 +2514,12 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
                 fprintf(gen->out, "ret %%Value %s\n", val_temp);
             } else {
                 emit_indent(gen);
-                fprintf(gen->out, "ret %%Value { i32 0, i64 0 }\n");
+                char null_temp[32];
+                snprintf(null_temp, sizeof(null_temp), "%%t%d", gen->temp_counter++);
+                emit_indent(gen);
+                fprintf(gen->out, "%s = call %%Value @make_null()\n", null_temp);
+                emit_indent(gen);
+                fprintf(gen->out, "ret %%Value %s\n", null_temp);
             }
             break;
         }
@@ -1849,6 +2545,19 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
         collect_strings_stmt(gen, s->node);
         s = s->next;
     }
+    // Register file path strings for runtime context
+    s = root->data.program.statements;
+    while (s != NULL) {
+        register_file_strings_stmt(gen, s->node);
+        s = s->next;
+    }
+
+    // Pre-pass: register function signatures for arity checks
+    s = root->data.program.statements;
+    while (s != NULL) {
+        register_functions_stmt(gen, s->node);
+        s = s->next;
+    }
 
     // Emit string literals
     fprintf(gen->out, "; String literals\n");
@@ -1860,12 +2569,7 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
 
     // Pre-register global variable mappings so functions can reference them
     ASTNodeList *stmt = root->data.program.statements;
-    while (stmt != NULL) {
-        if (stmt->node->type == NODE_VAR_DECL) {
-            create_unique_var_name(gen, stmt->node->data.var_decl.name, 1);
-        }
-        stmt = stmt->next;
-    }
+    preregister_globals_in_list(gen, stmt, 1);
 
     // Emit runtime implementation
     emit_runtime_impl(gen);
@@ -1886,7 +2590,8 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
     stmt = root->data.program.statements;
     while (stmt != NULL) {
         if (stmt->node->type == NODE_FUNC_DEF) {
-            VarMapping *saved_scope = push_scope(gen);
+            int saved_depth = 0;
+            VarMapping *saved_scope = push_scope(gen, &saved_depth);
             fprintf(gen->out, "define %%Value @%s(", stmt->node->data.func_def.name);
 
             ASTNodeList *param = stmt->node->data.func_def.params;
@@ -1901,14 +2606,26 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
             fprintf(gen->out, ") {\n");
             gen->indent_level = 1;
 
+            // Register parameters in current scope
+            param = stmt->node->data.func_def.params;
+            while (param != NULL) {
+                const char *pname = param->node->data.identifier.name;
+                create_unique_var_name(gen, pname, 0);
+                VarMapping *pm = find_var_mapping_current_scope(gen, pname);
+                if (pm) pm->declared = 1;
+                param = param->next;
+            }
+
             // Allocate and initialize parameters
             param = stmt->node->data.func_def.params;
             while (param != NULL) {
+                VarMapping *pm = find_var_mapping(gen, param->node->data.identifier.name);
+                const char *uname = pm ? pm->unique_name : param->node->data.identifier.name;
                 emit_indent(gen);
-                fprintf(gen->out, "%%%s = alloca %%Value\n", param->node->data.identifier.name);
+                fprintf(gen->out, "%%%s = alloca %%Value\n", uname);
                 emit_indent(gen);
                 fprintf(gen->out, "store %%Value %%param_%s, %%Value* %%%s\n",
-                        param->node->data.identifier.name, param->node->data.identifier.name);
+                        param->node->data.identifier.name, uname);
                 param = param->next;
             }
 
@@ -1925,7 +2642,7 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
 
             fprintf(gen->out, "}\n\n");
             gen->indent_level = 0;
-            pop_scope(gen, saved_scope);
+            pop_scope(gen, saved_scope, saved_depth);
         } else if (stmt->node->type == NODE_CLASS_DEF) {
             // Field init functions
             ASTNodeList *member = stmt->node->data.class_def.members;

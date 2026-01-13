@@ -78,6 +78,13 @@ static void gen_expr(CCodeGen *gen, ASTNode *node) {
                 gen_expr(gen, node->data.binary_op.right);
                 fprintf(gen->out, ")");
                 break;
+            } else if (node->data.binary_op.op == OP_NOT_IN) {
+                fprintf(gen->out, "not_in_operator(");
+                gen_expr(gen, node->data.binary_op.left);
+                fprintf(gen->out, ", ");
+                gen_expr(gen, node->data.binary_op.right);
+                fprintf(gen->out, ")");
+                break;
             }
 
             fprintf(gen->out, "binary_op(");
