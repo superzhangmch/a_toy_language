@@ -80,14 +80,25 @@ static void mark_environment(Environment *env) {
 // GC support: Mark global roots (called before GC collection)
 void gc_mark_interpreter_roots(void) {
     // Mark global and current environments
-    mark_environment(global_env);
-    if (current_env != global_env) {
+    if (global_env) {
+        mark_environment(global_env);
+    }
+    if (current_env && current_env != global_env) {
         mark_environment(current_env);
     }
 
     // Mark loop environment stack
     for (int i = 0; i < loop_env_top; i++) {
-        mark_environment(loop_env_stack[i]);
+        if (loop_env_stack[i]) {
+            mark_environment(loop_env_stack[i]);
+        }
+    }
+
+    // Mark this_stack (instance objects)
+    for (int i = 0; i < this_stack_top; i++) {
+        if (this_stack[i]) {
+            gc_mark_value(&this_stack[i]->fields);
+        }
     }
 
     // Mark return value if set
@@ -575,7 +586,7 @@ static Value eval_function_call(ASTNode *node) {
     if (strcmp(func_name, "gc_run") == 0) {
         return gc_run();
     }
-    if (strcmp(func_name, "gc_stats") == 0) {
+    if (strcmp(func_name, "gc_stat") == 0 || strcmp(func_name, "gc_stats") == 0) {
         gc_print_stats();
         return make_null();
     }
@@ -1095,43 +1106,128 @@ static void eval_class_def(ASTNode *node) {
 static void eval_try_catch(ASTNode *node) {
     set_error_ctx(node->line, node->file);
 
-    if (setjmp(exception_stack[exception_top++]) == 0) {
-        // Try block - create new scope
-        Environment *try_env = create_environment(current_env);
-        Environment *saved_env = current_env;
-        current_env = try_env;
-        execute_block(node->data.try_catch.try_block);
-        current_env = saved_env;
-        exception_top--;
-    } else {
-        // Catch block - create new scope
-        exception_top--;
-        Environment *catch_env = create_environment(current_env);
-        Environment *saved_env = current_env;
-        current_env = catch_env;
+    // ===========================================================================
+    // CRITICAL: Dual Exception System Integration
+    // ===========================================================================
+    // This interpreter must handle exceptions from TWO independent systems:
+    //
+    // 1. INTERPRETER exceptions (eval_raise):
+    //    - Uses exception_stack[] + longjmp()
+    //    - Triggered by: raise statement in user code
+    //
+    // 2. RUNTIME exceptions (__raise in runtime.c):
+    //    - Uses try_stack[] + longjmp()
+    //    - Triggered by: json_decode, assert, type errors in built-in functions
+    //    - Originally designed for LLVM codegen, not interpreter
+    //
+    // PROBLEM: If we only register with interpreter's exception_stack,
+    //          runtime exceptions (like json_decode errors) will call __raise(),
+    //          which checks try_top==0, sees no handler, and exit(1) immediately!
+    //          The interpreter's try-catch will NEVER see these exceptions.
+    //
+    // SOLUTION: Register with BOTH exception systems by:
+    //           - Pushing a handler onto runtime's try_stack (__try_push_buf)
+    //           - Setting up nested setjmp for both stacks
+    //           This creates a "bridge" between the two exception worlds.
+    // ===========================================================================
 
-        // Bind exception to variable
-        if (node->data.try_catch.catch_var) {
-            env_define(catch_env, node->data.try_catch.catch_var, exception_value);
+    void *runtime_buf = __try_push_buf();  // Register handler in runtime's try_stack
+    int caught_exception = 0;  // 0 = no exception, 1 = interpreter, 2 = runtime
+    Environment *saved_env = current_env;  // Save env (longjmp doesn't restore locals)
+
+    // Nested setjmp: outer catches interpreter exceptions, inner catches runtime exceptions
+    if (setjmp(exception_stack[exception_top++]) == 0) {
+        // Set up runtime exception handler (catches json_decode, assert, etc.)
+        if (setjmp(*(jmp_buf*)runtime_buf) == 0) {
+            // Try block - NO new scope (per language spec)
+            execute_block(node->data.try_catch.try_block);
+            // Normal completion - no exception
+        } else {
+            // Caught runtime exception (from json_decode, assert, built-in type errors)
+            caught_exception = 2;
+            exception_value = __get_exception();  // Get exception from runtime system
+        }
+    } else {
+        // Caught interpreter exception (from raise statement)
+        caught_exception = 1;
+        // exception_value already set by eval_raise()
+    }
+
+    // Clean up exception handlers from both systems
+    exception_top--;   // Pop from interpreter stack
+    __try_pop();       // Pop from runtime stack
+
+    // Restore environment (longjmp may have left it in inconsistent state)
+    current_env = saved_env;
+
+    // If exception was caught, execute catch block
+    if (caught_exception) {
+        // Save exception value in a local variable to protect it during GC
+        // NOTE: GC may be triggered during gc_alloc() below. The exception_value
+        // global is only marked when exception_top > 0, but we just decremented it.
+        // So we need to protect it by storing in a stack variable (conservative
+        // stack scanning will find it) and also explicitly marking it.
+        Value exc_val = exception_value;
+
+        // Register exception value as a temporary GC root
+        gc_push_root(&exc_val);
+
+        // Format exception message to match LLVM backend output
+        // LLVM format: [caught in file:line] original_message
+        if (exc_val.type == TYPE_STRING) {
+            char buf[1024];
+            snprintf(buf, sizeof(buf), "[caught in %s:%d] %s",
+                     node->file, node->line, (char*)exc_val.data);
+            char *full = gc_alloc(TYPE_STRING, strlen(buf) + 1);  // May trigger GC!
+            strcpy(full, buf);
+            exc_val = (Value){TYPE_STRING, (long)full};
         }
 
+        // Bind exception to catch variable
+        // Allow reusing same catch var name across multiple try-catch blocks
+        if (node->data.try_catch.catch_var) {
+            if (env_exists(current_env, node->data.try_catch.catch_var)) {
+                env_set(current_env, node->data.try_catch.catch_var, exc_val);
+            } else {
+                env_define(current_env, node->data.try_catch.catch_var, exc_val);  // May trigger GC!
+            }
+        }
+
+        // Unregister temporary root before executing catch block
+        gc_pop_root();
+
         execute_block(node->data.try_catch.catch_block);
-        current_env = saved_env;
     }
 }
 
 static void eval_raise(ASTNode *node) {
     set_error_ctx(node->line, node->file);
 
-    exception_value = eval_expression(node->data.raise_stmt.expr);
+    Value msg = eval_expression(node->data.raise_stmt.expr);
 
+    // Format exception message to match LLVM backend format
+    // Format: file:line: message
+    // (The "[caught in ...]" prefix will be added by eval_try_catch when caught)
+    char buf[1024];
+    char *msg_str;
+    if (msg.type == TYPE_STRING) {
+        msg_str = (char*)msg.data;
+    } else {
+        Value s = to_string(msg);
+        msg_str = (char*)s.data;
+    }
+
+    snprintf(buf, sizeof(buf), "%s:%d: %s", node->file, node->line, msg_str);
+    char *full = gc_alloc(TYPE_STRING, strlen(buf) + 1);
+    strcpy(full, buf);
+    exception_value = (Value){TYPE_STRING, (long)full};
+
+    // Throw exception on interpreter's exception_stack
     if (exception_top > 0) {
         longjmp(exception_stack[exception_top - 1], 1);
     } else {
-        // Unhandled exception
-        printf("Uncaught exception: ");
-        print_value(exception_value);
-        printf("\n");
+        // No try-catch handler - unhandled exception
+        printf("Uncaught exception: %s\n", full);
         exit(1);
     }
 }

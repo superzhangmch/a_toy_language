@@ -496,6 +496,18 @@ static void collect_strings_stmt(LLVMCodeGen *gen, ASTNode *node) {
             }
             break;
 
+        case NODE_FOR_STMT:
+            collect_strings_expr(gen, node->data.for_stmt.start);
+            collect_strings_expr(gen, node->data.for_stmt.end);
+            {
+                ASTNodeList *stmt = node->data.for_stmt.body;
+                while (stmt != NULL) {
+                    collect_strings_stmt(gen, stmt->node);
+                    stmt = stmt->next;
+                }
+            }
+            break;
+
         case NODE_TRY_CATCH: {
             register_string_literal(gen, node->file ? node->file : "<input>");
             register_string_literal(gen, "[caught in ");

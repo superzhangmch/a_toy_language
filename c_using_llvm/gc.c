@@ -84,11 +84,22 @@ static void mark_array(Array *a) {
 static void mark_dict(Dict *d) {
     if (!d) return;
 
-    for (int i = 0; i < 256; i++) {  // HASH_SIZE = 256
-        DictEntry *entry = d->buckets[i];
-        while (entry) {
-            mark_value(&entry->value);
-            entry = entry->next;
+    // Mark the buckets array itself (allocated with gc_alloc)
+    if (d->buckets) {
+        GCObject *buckets_obj = find_gc_object(d->buckets);
+        if (buckets_obj && !buckets_obj->marked) {
+            buckets_obj->marked = 1;
+        }
+    }
+
+    // Mark values in dictionary entries
+    if (d->buckets) {
+        for (int i = 0; i < 256; i++) {  // HASH_SIZE = 256
+            DictEntry *entry = d->buckets[i];
+            while (entry) {
+                mark_value(&entry->value);
+                entry = entry->next;
+            }
         }
     }
 }
@@ -113,6 +124,16 @@ static void mark_value(Value *v) {
     }
 
     if (!v->data) return;  // Null pointer
+
+    // Validate pointer looks reasonable (not corrupted)
+    // Valid heap pointers should be in a reasonable range
+    // Note: Conservative stack scanning may find false positives (random stack
+    // values that happen to fall in heap range). These are safely ignored here.
+    uintptr_t addr = (uintptr_t)v->data;
+    if (addr < 4096 || addr == (uintptr_t)-1) {
+        // Invalid pointer - likely false positive from conservative scanning
+        return;
+    }
 
     // Find the GC object header
     GCObject *obj = ptr_to_gcobject((void*)v->data);
