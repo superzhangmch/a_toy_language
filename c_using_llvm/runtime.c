@@ -128,8 +128,7 @@ Value append(Value arr, Value val) {
         a->capacity = new_capacity;
     }
     ((Value*)a->data)[a->size++] = val;
-    Value result = {TYPE_BOOL, 0};
-    return result;
+    return arr;  // Return the array, not a boolean
 }
 
 // Get array element
@@ -560,7 +559,7 @@ Value dict_set(Value dict, Value key, Value val) {
         if (strcmp(entry->key, key_str) == 0) {
             entry->value = val;  // Update existing value
             if (key.type == TYPE_INT) free(key_str);  // Free temp string if int key
-            return val;
+            return dict;
         }
         entry = entry->next;
     }
@@ -577,7 +576,7 @@ Value dict_set(Value dict, Value key, Value val) {
     d->buckets[idx] = entry;
     d->size++;
 
-    return val;
+    return dict;
 }
 
 // Get value from dict by key

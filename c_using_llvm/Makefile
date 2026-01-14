@@ -33,8 +33,8 @@ core/lex.yy.c: core/tiny.l core/tiny.tab.h
 # Ensure headers are generated before compiling sources that include them
 core/ast.o: core/tiny.tab.h
 
-$(INTERP_TARGET): $(INTERP_OBJS)
-	$(CC) $(CFLAGS) -o $(INTERP_TARGET) $(INTERP_OBJS) $(LIBS)
+$(INTERP_TARGET): $(INTERP_OBJS) $(RUNTIME)
+	$(CC) $(CFLAGS) -o $(INTERP_TARGET) $(INTERP_OBJS) $(RUNTIME) $(LIBS)
 
 $(COMPILER_TARGET): $(COMPILER_OBJS)
 	$(CC) $(CFLAGS) -o $(COMPILER_TARGET) $(COMPILER_OBJS) $(LIBS)

@@ -7,6 +7,17 @@
 // Global GC instance
 GC gc;
 
+// Forward declarations
+static void mark_value(Value *v);
+
+// Weak symbol for interpreter roots marking (defined in interpreter.c if linked)
+// Provide default empty implementation for when interpreter is not linked
+void gc_mark_interpreter_roots(void) __attribute__((weak));
+void gc_mark_interpreter_roots(void) {
+    // Default empty implementation
+    // This will be overridden by interpreter.c if linked
+}
+
 // Initialize GC
 void gc_init(void) {
     gc.root_count = 0;
@@ -221,6 +232,10 @@ static void mark_from_roots(void) {
             mark_value(gc.roots[i]);
         }
     }
+
+    // Mark interpreter-specific roots (if linked with interpreter)
+    // The weak symbol will be overridden if interpreter.o is linked
+    gc_mark_interpreter_roots();
 }
 
 // Sweep phase: free unmarked objects

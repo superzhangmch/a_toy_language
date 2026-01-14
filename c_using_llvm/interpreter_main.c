@@ -3,6 +3,7 @@
 #include "ast.h"
 #include "interpreter.h"
 #include "core/preprocess.h"
+#include "gc.h"
 
 extern int yyparse();
 extern FILE *yyin;
@@ -15,6 +16,13 @@ extern YY_BUFFER_STATE yy_scan_string(const char *yy_str);
 extern void yy_delete_buffer(YY_BUFFER_STATE b);
 
 int main(int argc, char **argv) {
+    // Initialize GC
+    gc_init();
+
+    // Set stack bottom for conservative stack scanning
+    int stack_anchor;
+    gc_set_stack_bottom(&stack_anchor);
+
     // Set command line arguments for cmd_args() builtin
     set_cmd_args(argc, argv);
 

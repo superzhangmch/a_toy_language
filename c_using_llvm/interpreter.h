@@ -2,124 +2,57 @@
 #define INTERPRETER_H
 
 #include "ast.h"
+#include "runtime.h"  // Use runtime.h's Value, Array, Dict, etc.
+#include "gc.h"       // Use GC for memory management
 
-typedef enum {
-    VAL_INT,
-    VAL_FLOAT,
-    VAL_STRING,
-    VAL_BOOL,
-    VAL_ARRAY,
-    VAL_DICT,
-    VAL_FUNC,
-    VAL_BUILTIN,
-    VAL_CLASS,
-    VAL_INSTANCE,
-    VAL_NULL
-} ValueType;
+// ============================================================================
+// Interpreter-specific structures (not in runtime.h)
+// ============================================================================
 
-typedef struct Value Value;
-typedef struct Environment Environment;
-typedef struct Function Function;
-typedef struct Array Array;
-typedef struct Dict Dict;
-typedef struct ClassValue ClassValue;
-typedef struct ClassInstance ClassInstance;
-
-typedef Value *(*BuiltinFunc)(Value **args, int arg_count);
-
-struct Value {
-    ValueType type;
-    union {
-        int int_val;
-        double float_val;
-        char *string_val;
-        int bool_val;
-        Array *array_val;
-        Dict *dict_val;
-        Function *func_val;
-        BuiltinFunc builtin_val;
-        ClassValue *class_val;
-        ClassInstance *instance_val;
-    } data;
-};
-
-struct Array {
-    Value **elements;
-    int size;
-    int capacity;
-};
-
-typedef struct DictEntry {
-    char *key;
-    Value *value;
-    struct DictEntry *next;
-} DictEntry;
-
-struct Dict {
-    DictEntry **buckets;
-    int size;
-};
-
-struct Function {
+// Function represents a user-defined function in the interpreter
+// This stores the AST for the function body, which is needed for interpretation
+typedef struct Function {
     char *name;
     ASTNodeList *params;
     ASTNodeList *body;
-    Environment *env;
-};
+    struct Environment *env;  // Closure environment
+} Function;
 
-struct ClassValue {
+// ClassValue represents a class definition
+typedef struct ClassValue {
     char *name;
-    ASTNodeList *members;  // Var declarations
-    ASTNodeList *methods;  // Function definitions
-    Environment *env;      // Defining environment
-};
+    ASTNodeList *members;   // Variable declarations
+    ASTNodeList *methods;   // Function definitions
+    struct Environment *env;
+} ClassValue;
 
-struct ClassInstance {
-    ClassValue *class_val;
-    Dict *fields;
-};
-
+// Environment for variable scoping
 typedef struct EnvEntry {
     char *name;
-    Value *value;
+    Value value;  // Now stores Value directly (not Value*)
     struct EnvEntry *next;
 } EnvEntry;
 
-struct Environment {
+typedef struct Environment {
     EnvEntry **buckets;
     int size;
-    Environment *parent;
-};
+    struct Environment *parent;
+} Environment;
 
-/* Value functions */
-Value *create_int_value(int val);
-Value *create_float_value(double val);
-Value *create_string_value(char *val);
-Value *create_bool_value(int val);
-Value *create_array_value();
-Value *create_dict_value();
-Value *create_func_value(char *name, ASTNodeList *params, ASTNodeList *body, Environment *env);
-Value *create_builtin_value(BuiltinFunc func);
-Value *create_null_value();
+// ============================================================================
+// Environment functions
+// ============================================================================
 
-/* Array functions */
-void array_append(Array *arr, Value *val);
-Value *array_get(Array *arr, int index);
-void array_set(Array *arr, int index, Value *val);
+Environment *create_environment(struct Environment *parent);
+void env_define(Environment *env, char *name, Value val);
+Value env_get(Environment *env, char *name);
+void env_set(Environment *env, char *name, Value val);
+int env_exists(Environment *env, char *name);
 
-/* Dict functions */
-void dict_set(Dict *dict, char *key, Value *val);
-Value *dict_get(Dict *dict, char *key);
-char **dict_keys(Dict *dict, int *count);
+// ============================================================================
+// Interpreter functions
+// ============================================================================
 
-/* Environment functions */
-Environment *create_environment(Environment *parent);
-void env_define(Environment *env, char *name, Value *val);
-Value *env_get(Environment *env, char *name);
-void env_set(Environment *env, char *name, Value *val);
-
-/* Interpreter functions */
-void set_cmd_args(int argc, char **argv);
 void interpret(ASTNode *root);
 
 #endif /* INTERPRETER_H */

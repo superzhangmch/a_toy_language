@@ -1,51 +1,116 @@
+/*
+ * Interpreter for Tiny Language
+ *
+ * This version uses runtime.c for all Value operations, built-in functions,
+ * and memory management (GC). The interpreter only needs to handle:
+ * - AST traversal and evaluation
+ * - Variable scoping (Environment)
+ * - Control flow (if/while/for/break/continue/return)
+ * - Function calls and class instantiation
+ */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <setjmp.h>
-#include <regex.h>
-#include <ctype.h>
-#include <math.h>
 #include <stdarg.h>
-#include "type_check_common.h"
+#include <math.h>
 #include "interpreter.h"
 #include "ast.h"
+#include "runtime.h"
+#include "gc.h"
 
-#define HASH_SIZE 128
+// ============================================================================
+// Global state
+// ============================================================================
 
+// Custom interpreter-only types (not in runtime.h)
+#define TYPE_FUNC 100  // User-defined functions
+
+// Control flow
 static jmp_buf break_jmp;
 static jmp_buf continue_jmp;
 static int has_returned;
-static Value *return_value;
+static Value return_value;
+
+// Exception handling
 static jmp_buf exception_stack[256];
 static int exception_top = 0;
-static Value *exception_value = NULL;
+static Value exception_value;
 
+// Environment
 static Environment *global_env;
 static Environment *current_env;
+
+// Loop and class context
 static Environment *loop_env_stack[256];
 static int loop_env_top = 0;
-static ClassInstance *this_stack[256];
+static Instance *this_stack[256];
 static int this_stack_top = 0;
+
+// Error context
 static int err_line = -1;
 static const char *err_file = NULL;
 
-// Global storage for command line arguments
-static int g_argc = 0;
-static char **g_argv = NULL;
+// ============================================================================
+// Forward declarations
+// ============================================================================
 
-/* Forward declarations */
-static Value *eval_expression(ASTNode *node);
+static Value eval_expression(ASTNode *node);
 static void eval_statement(ASTNode *node);
-static void setup_builtins();
-static Value *instantiate_class(ClassValue *cls, Value **args, int arg_count);
-static Value *call_method(Value *instance_val, const char *name, Value **args, int arg_count);
 static void execute_block(ASTNodeList *stmts);
+static Value call_function(Function *func, Value *args, int arg_count);
+static Value call_method_internal(Value instance_val, const char *method_name, Value *args, int arg_count);
+
+// GC support: Mark all values in an environment
+static void mark_environment(Environment *env) {
+    if (!env) return;
+
+    // Mark all values in this environment
+    for (int i = 0; i < HASH_SIZE; i++) {
+        for (EnvEntry *e = env->buckets[i]; e != NULL; e = e->next) {
+            gc_mark_value(&e->value);
+        }
+    }
+
+    // Recursively mark parent environment
+    mark_environment(env->parent);
+}
+
+// GC support: Mark global roots (called before GC collection)
+void gc_mark_interpreter_roots(void) {
+    // Mark global and current environments
+    mark_environment(global_env);
+    if (current_env != global_env) {
+        mark_environment(current_env);
+    }
+
+    // Mark loop environment stack
+    for (int i = 0; i < loop_env_top; i++) {
+        mark_environment(loop_env_stack[i]);
+    }
+
+    // Mark return value if set
+    if (has_returned) {
+        gc_mark_value(&return_value);
+    }
+
+    // Mark exception value if set
+    if (exception_top > 0) {
+        gc_mark_value(&exception_value);
+    }
+}
+
+// ============================================================================
+// Utility functions
+// ============================================================================
+
 static void set_error_ctx(int line, const char *file) {
     err_line = line;
     err_file = file ? file : "<input>";
 }
 
-static __attribute__((noreturn)) void type_errorf(const char *fmt, ...) {
+static __attribute__((noreturn)) void runtime_error(const char *fmt, ...) {
     fprintf(stderr, "Error at %s:%d: ", err_file ? err_file : "<input>", err_line >= 0 ? err_line : 0);
     va_list ap;
     va_start(ap, fmt);
@@ -55,208 +120,18 @@ static __attribute__((noreturn)) void type_errorf(const char *fmt, ...) {
     exit(1);
 }
 
-/* Hash function */
-static unsigned int hash(const char *str) {
+static unsigned int hash_string(const char *str) {
     unsigned int hash = 5381;
     int c;
     while ((c = *str++))
         hash = ((hash << 5) + hash) + c;
-    return hash % HASH_SIZE;
+    return hash % 256;  // Use a power of 2 for environments
 }
 
-/* Value functions */
-Value *create_int_value(int val) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_INT;
-    v->data.int_val = val;
-    return v;
-}
+// ============================================================================
+// Environment implementation
+// ============================================================================
 
-Value *create_float_value(double val) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_FLOAT;
-    v->data.float_val = val;
-    return v;
-}
-
-Value *create_string_value(char *val) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_STRING;
-    v->data.string_val = strdup(val);
-    return v;
-}
-
-Value *create_bool_value(int val) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_BOOL;
-    v->data.bool_val = val;
-    return v;
-}
-
-Value *create_array_value() {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_ARRAY;
-    v->data.array_val = malloc(sizeof(Array));
-    v->data.array_val->elements = NULL;
-    v->data.array_val->size = 0;
-    v->data.array_val->capacity = 0;
-    return v;
-}
-
-Value *create_dict_value() {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_DICT;
-    v->data.dict_val = malloc(sizeof(Dict));
-    v->data.dict_val->buckets = calloc(HASH_SIZE, sizeof(DictEntry*));
-    v->data.dict_val->size = 0;
-    return v;
-}
-
-Value *create_func_value(char *name, ASTNodeList *params, ASTNodeList *body, Environment *env) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_FUNC;
-    v->data.func_val = malloc(sizeof(Function));
-    v->data.func_val->name = strdup(name);
-    v->data.func_val->params = params;
-    v->data.func_val->body = body;
-    v->data.func_val->env = env;
-    return v;
-}
-
-Value *create_builtin_value(BuiltinFunc func) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_BUILTIN;
-    v->data.builtin_val = func;
-    return v;
-}
-
-Value *create_class_value(char *name, ASTNodeList *members, ASTNodeList *methods, Environment *env) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_CLASS;
-    v->data.class_val = malloc(sizeof(ClassValue));
-    v->data.class_val->name = strdup(name);
-    v->data.class_val->members = members;
-    v->data.class_val->methods = methods;
-    v->data.class_val->env = env;
-    return v;
-}
-
-Value *create_instance_value(ClassValue *class_val) {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_INSTANCE;
-    v->data.instance_val = malloc(sizeof(ClassInstance));
-    v->data.instance_val->class_val = class_val;
-    v->data.instance_val->fields = create_dict_value()->data.dict_val;
-    return v;
-}
-
-Value *create_null_value() {
-    Value *v = malloc(sizeof(Value));
-    v->type = VAL_NULL;
-    return v;
-}
-
-/* Array functions */
-void array_append(Array *arr, Value *val) {
-    if (arr->size >= arr->capacity) {
-        arr->capacity = arr->capacity == 0 ? 8 : arr->capacity * 2;
-        arr->elements = realloc(arr->elements, arr->capacity * sizeof(Value*));
-    }
-    arr->elements[arr->size++] = val;
-}
-
-Value *array_get(Array *arr, int index) {
-    if (index < 0 || index >= arr->size) {
-        fprintf(stderr, "Array index out of bounds: %d\n", index);
-        exit(1);
-    }
-    return arr->elements[index];
-}
-
-void array_set(Array *arr, int index, Value *val) {
-    if (index < 0 || index >= arr->size) {
-        fprintf(stderr, "Array index out of bounds: %d\n", index);
-        exit(1);
-    }
-    arr->elements[index] = val;
-}
-
-/* Dict functions */
-void dict_set(Dict *dict, char *key, Value *val) {
-    unsigned int idx = hash(key);
-    DictEntry *entry = dict->buckets[idx];
-
-    while (entry != NULL) {
-        if (strcmp(entry->key, key) == 0) {
-            entry->value = val;
-            return;
-        }
-        entry = entry->next;
-    }
-
-    entry = malloc(sizeof(DictEntry));
-    entry->key = strdup(key);
-    entry->value = val;
-    entry->next = dict->buckets[idx];
-    dict->buckets[idx] = entry;
-    dict->size++;
-}
-
-Value *dict_get(Dict *dict, char *key) {
-    unsigned int idx = hash(key);
-    DictEntry *entry = dict->buckets[idx];
-
-    while (entry != NULL) {
-        if (strcmp(entry->key, key) == 0) {
-            return entry->value;
-        }
-        entry = entry->next;
-    }
-
-    fprintf(stderr, "Dictionary key not found: %s\n", key);
-    exit(1);
-}
-
-char **dict_keys(Dict *dict, int *count) {
-    char **keys = malloc(dict->size * sizeof(char*));
-    int idx = 0;
-
-    for (int i = 0; i < HASH_SIZE; i++) {
-        DictEntry *entry = dict->buckets[i];
-        while (entry != NULL) {
-            keys[idx++] = entry->key;
-            entry = entry->next;
-        }
-    }
-
-    *count = dict->size;
-    return keys;
-}
-
-static int dict_delete(Dict *dict, const char *key) {
-    unsigned int idx = hash(key);
-    DictEntry *entry = dict->buckets[idx];
-    DictEntry *prev = NULL;
-
-    while (entry != NULL) {
-        if (strcmp(entry->key, key) == 0) {
-            if (prev == NULL) {
-                dict->buckets[idx] = entry->next;
-            } else {
-                prev->next = entry->next;
-            }
-            free(entry->key);
-            free(entry);
-            dict->size--;
-            return 1;
-        }
-        prev = entry;
-        entry = entry->next;
-    }
-    return 0;
-}
-
-/* Environment functions */
 Environment *create_environment(Environment *parent) {
     Environment *env = malloc(sizeof(Environment));
     env->buckets = calloc(HASH_SIZE, sizeof(EnvEntry*));
@@ -265,17 +140,17 @@ Environment *create_environment(Environment *parent) {
     return env;
 }
 
-void env_define(Environment *env, char *name, Value *val) {
-    // Disallow redefinition in the same scope
-    unsigned int idx = hash(name);
-    EnvEntry *cur = env->buckets[idx];
-    while (cur != NULL) {
-        if (strcmp(cur->name, name) == 0) {
-            type_errorf("Redefinition of '%s' in the same scope", name);
+void env_define(Environment *env, char *name, Value val) {
+    unsigned int idx = hash_string(name);
+
+    // Check if already defined in current scope
+    for (EnvEntry *e = env->buckets[idx]; e != NULL; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            runtime_error("Redefinition of '%s' in the same scope", name);
         }
-        cur = cur->next;
     }
 
+    // Add new entry
     EnvEntry *entry = malloc(sizeof(EnvEntry));
     entry->name = strdup(name);
     entry->value = val;
@@ -284,2310 +159,1127 @@ void env_define(Environment *env, char *name, Value *val) {
     env->size++;
 }
 
-// Set if exists in current scope, otherwise define
-void env_set_or_define(Environment *env, char *name, Value *val) {
-    unsigned int idx = hash(name);
-    EnvEntry *cur = env->buckets[idx];
-    while (cur != NULL) {
-        if (strcmp(cur->name, name) == 0) {
-            cur->value = val;
-            return;
+int env_exists(Environment *env, char *name) {
+    unsigned int idx = hash_string(name);
+    for (EnvEntry *e = env->buckets[idx]; e != NULL; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            return 1;
         }
-        cur = cur->next;
     }
-    env_define(env, name, val);
-}
-
-// Check if name exists only in current scope
-static int env_exists_current(Environment *env, const char *name) {
-    unsigned int idx = hash(name);
-    EnvEntry *cur = env->buckets[idx];
-    while (cur != NULL) {
-        if (strcmp(cur->name, name) == 0) return 1;
-        cur = cur->next;
+    if (env->parent) {
+        return env_exists(env->parent, name);
     }
     return 0;
 }
 
-Value *env_get(Environment *env, char *name) {
-    unsigned int idx = hash(name);
-    EnvEntry *entry = env->buckets[idx];
-
-    while (entry != NULL) {
-        if (strcmp(entry->name, name) == 0) {
-            return entry->value;
+Value env_get(Environment *env, char *name) {
+    unsigned int idx = hash_string(name);
+    for (EnvEntry *e = env->buckets[idx]; e != NULL; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            return e->value;
         }
-        entry = entry->next;
     }
-
-    if (env->parent != NULL) {
+    if (env->parent) {
         return env_get(env->parent, name);
     }
-
-    type_errorf("Undefined variable: %s", name);
+    runtime_error("Undefined variable: %s", name);
 }
 
-void env_set(Environment *env, char *name, Value *val) {
-    unsigned int idx = hash(name);
-    EnvEntry *entry = env->buckets[idx];
-
-    while (entry != NULL) {
-        if (strcmp(entry->name, name) == 0) {
-            entry->value = val;
+void env_set(Environment *env, char *name, Value val) {
+    unsigned int idx = hash_string(name);
+    for (EnvEntry *e = env->buckets[idx]; e != NULL; e = e->next) {
+        if (strcmp(e->name, name) == 0) {
+            e->value = val;
             return;
         }
-        entry = entry->next;
     }
-
-    if (env->parent != NULL) {
+    if (env->parent) {
         env_set(env->parent, name, val);
         return;
     }
-
-    fprintf(stderr, "Undefined variable: %s\n", name);
-    exit(1);
+    runtime_error("Undefined variable: %s", name);
 }
 
-/* Class helpers */
-static void push_this(ClassInstance *instance) {
-    if (this_stack_top >= 256) {
-        fprintf(stderr, "this stack overflow\n");
-        exit(1);
-    }
-    this_stack[this_stack_top++] = instance;
-}
+// ============================================================================
+// Expression evaluation
+// ============================================================================
 
-static void pop_this() {
-    if (this_stack_top > 0) this_stack_top--;
-}
+static Value eval_literal(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
 
-static int is_internal_access(ClassInstance *instance) {
-    return this_stack_top > 0 && this_stack[this_stack_top - 1]->class_val == instance->class_val;
-}
+    switch (node->type) {
+        case NODE_INT_LITERAL:
+            return (Value){TYPE_INT, node->data.int_literal.value};
 
-static Function* find_method(ClassValue *cls, const char *name) {
-    ASTNodeList *m = cls->methods;
-    while (m != NULL) {
-        if (strcmp(m->node->data.func_def.name, name) == 0) {
-            // Reuse the AST node directly
-            Function *f = malloc(sizeof(Function));
-            f->name = m->node->data.func_def.name;
-            f->params = m->node->data.func_def.params;
-            f->body = m->node->data.func_def.body;
-            f->env = cls->env;
-            return f;
+        case NODE_FLOAT_LITERAL: {
+            double d = node->data.float_literal.value;
+            return (Value){TYPE_FLOAT, *(long*)&d};
         }
-        m = m->next;
-    }
-    return NULL;
-}
 
-static Value *get_member(ClassInstance *instance, const char *name) {
-    if (instance == NULL) {
-        fprintf(stderr, "Member access on null instance\n");
-        exit(1);
-    }
-
-    int is_private = name[0] == '_';
-    if (is_private && !is_internal_access(instance)) {
-        fprintf(stderr, "Cannot access private member '%s' of class %s\n", name, instance->class_val->name);
-        exit(1);
-    }
-
-    Dict *fields = instance->fields;
-    unsigned int idx = hash(name);
-    DictEntry *entry = fields->buckets[idx];
-    while (entry != NULL) {
-        if (strcmp(entry->key, name) == 0) {
-            return entry->value;
+        case NODE_STRING_LITERAL: {
+            int len = strlen(node->data.string_literal.value);
+            char *str = gc_alloc(TYPE_STRING, len + 1);
+            strcpy(str, node->data.string_literal.value);
+            return (Value){TYPE_STRING, (long)str};
         }
-        entry = entry->next;
-    }
 
-    Function *m = find_method(instance->class_val, name);
-    if (m != NULL) {
-        Value *v = malloc(sizeof(Value));
-        v->type = VAL_FUNC;
-        v->data.func_val = m;
-        return v;
-    }
+        case NODE_BOOL_LITERAL:
+            return (Value){TYPE_BOOL, node->data.bool_literal.value ? 1 : 0};
 
-    fprintf(stderr, "Member '%s' not found on class %s\n", name, instance->class_val->name);
-    exit(1);
-}
+        case NODE_NULL_LITERAL:
+            return (Value){TYPE_NULL, 0};
 
-static void set_member(ClassInstance *instance, const char *name, Value *val) {
-    if (instance == NULL) {
-        fprintf(stderr, "Member assignment on null instance\n");
-        exit(1);
-    }
-
-    int is_private = name[0] == '_';
-    if (is_private && !is_internal_access(instance)) {
-        fprintf(stderr, "Cannot access private member '%s' of class %s\n", name, instance->class_val->name);
-        exit(1);
-    }
-
-    dict_set(instance->fields, (char*)name, val);
-}
-/* Built-in functions */
-static void print_value_recursive(Value *v) {
-    switch (v->type) {
-        case VAL_INT:
-            printf("%d", v->data.int_val);
-            break;
-        case VAL_FLOAT:
-            printf("%g", v->data.float_val);
-            break;
-        case VAL_STRING:
-            printf("\"%s\"", v->data.string_val);
-            break;
-        case VAL_BOOL:
-            printf("%s", v->data.bool_val ? "true" : "false");
-            break;
-        case VAL_NULL:
-            printf("null");
-            break;
-        case VAL_ARRAY: {
-            printf("[");
-            Array *arr = v->data.array_val;
-            for (int j = 0; j < arr->size; j++) {
-                print_value_recursive(arr->elements[j]);
-                if (j < arr->size - 1) printf(", ");
-            }
-            printf("]");
-            break;
-        }
-        case VAL_DICT: {
-            printf("{");
-            Dict *dict = v->data.dict_val;
-            int count = 0;
-            for (int j = 0; j < HASH_SIZE; j++) {
-                DictEntry *entry = dict->buckets[j];
-                while (entry != NULL) {
-                    if (count > 0) printf(", ");
-                    printf("\"%s\": ", entry->key);
-                    print_value_recursive(entry->value);
-                    entry = entry->next;
-                    count++;
-                }
-            }
-            printf("}");
-            break;
-        }
-        case VAL_CLASS:
-            printf("<class %s>", v->data.class_val->name);
-            break;
-        case VAL_INSTANCE:
-            printf("<instance %s>", v->data.instance_val->class_val->name);
-            break;
         default:
-            printf("<object>");
+            runtime_error("Unknown literal type");
     }
 }
 
-/* Exception helpers */
-static char *value_to_string(Value *v) {
-    char buf[256];
-    switch (v->type) {
-        case VAL_STRING:
-            return strdup(v->data.string_val);
-        case VAL_INT:
-            snprintf(buf, sizeof(buf), "%d", v->data.int_val);
-            return strdup(buf);
-        case VAL_FLOAT:
-            snprintf(buf, sizeof(buf), "%g", v->data.float_val);
-            return strdup(buf);
-        case VAL_BOOL:
-            return strdup(v->data.bool_val ? "true" : "false");
-        case VAL_NULL:
-            return strdup("null");
-        default:
-            return strdup("<object>");
-    }
-}
+static Value eval_array_literal(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
 
-static void raise_exception(Value *msg, const char *file, int line) {
-    char *mstr = value_to_string(msg);
-    char full[512];
-    snprintf(full, sizeof(full), "%s:%d: %s", file ? file : "<input>", line, mstr);
-    free(mstr);
-    exception_value = create_string_value(full);
+    Value arr = make_array();
+    ASTNodeList *elem = node->data.array_literal.elements;
 
-    if (exception_top > 0) {
-        longjmp(exception_stack[exception_top - 1], 1);
+    while (elem) {
+        Value val = eval_expression(elem->node);
+        arr = append(arr, val);
+        elem = elem->next;
     }
-    fprintf(stderr, "%s\n", full);
-    exit(1);
-}
 
-static Value *builtin_print(Value **args, int arg_count) {
-    for (int i = 0; i < arg_count; i++) {
-        Value *v = args[i];
-        // For non-string types, print without quotes
-        if (v->type == VAL_STRING) {
-            printf("%s", v->data.string_val);
-        } else if (v->type == VAL_ARRAY || v->type == VAL_DICT) {
-            print_value_recursive(v);
-        } else {
-            switch (v->type) {
-                case VAL_INT:
-                    printf("%d", v->data.int_val);
-                    break;
-                case VAL_FLOAT:
-                    printf("%g", v->data.float_val);
-                    break;
-                case VAL_BOOL:
-                    printf("%s", v->data.bool_val ? "true" : "false");
-                    break;
-                case VAL_NULL:
-                    printf("null");
-                    break;
-                default:
-                    printf("<object>");
-            }
-        }
-        if (i < arg_count - 1) printf(" ");
-    }
-    return create_null_value();
-}
-
-static Value *builtin_println(Value **args, int arg_count) {
-    builtin_print(args, arg_count);
-    printf("\n");
-    return create_null_value();
-}
-
-static Value *builtin_len(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        type_errorf("len() takes exactly 1 argument");
-    }
-    Value *v = args[0];
-    if (v->type == VAL_STRING) {
-        return create_int_value(strlen(v->data.string_val));
-    } else if (v->type == VAL_ARRAY) {
-        return create_int_value(v->data.array_val->size);
-    } else if (v->type == VAL_DICT) {
-        return create_int_value(v->data.dict_val->size);
-    }
-    type_errorf("len() not supported for this type");
-}
-
-static Value *builtin_int(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        type_errorf("int() takes exactly 1 argument");
-    }
-    Value *v = args[0];
-    if (v->type == VAL_INT) return v;
-    if (v->type == VAL_FLOAT) return create_int_value((int)v->data.float_val);
-    if (v->type == VAL_STRING) return create_int_value(atoi(v->data.string_val));
-    if (v->type == VAL_BOOL) return create_int_value(v->data.bool_val);
-    type_errorf("int() requires int/float/string/bool");
-}
-
-static Value *builtin_float(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        type_errorf("float() takes exactly 1 argument");
-    }
-    Value *v = args[0];
-    if (v->type == VAL_FLOAT) return v;
-    if (v->type == VAL_INT) return create_float_value((double)v->data.int_val);
-    if (v->type == VAL_STRING) return create_float_value(atof(v->data.string_val));
-    if (v->type == VAL_BOOL) return create_float_value(v->data.bool_val ? 1.0 : 0.0);
-    type_errorf("float() requires int/float/string/bool");
-}
-
-static double value_to_double_interp(Value *v) {
-    switch (v->type) {
-        case VAL_INT: return v->data.int_val;
-        case VAL_FLOAT: return v->data.float_val;
-        case VAL_BOOL: return v->data.bool_val ? 1.0 : 0.0;
-        case VAL_STRING: return atof(v->data.string_val);
-        default:
-            type_errorf("Math functions require numeric/string convertible types");
-    }
-}
-
-static Value *builtin_sin(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "sin() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(sin(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_cos(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "cos() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(cos(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_asin(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "asin() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(asin(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_acos(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "acos() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(acos(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_log(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "log() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(log(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_sqrt(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "sqrt() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(sqrt(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_exp(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "exp() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(exp(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_ceil(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "ceil() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(ceil(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_floor(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "floor() takes exactly 1 argument\n");
-        exit(1);
-    }
-    return create_float_value(floor(value_to_double_interp(args[0])));
-}
-
-static Value *builtin_round_val(Value **args, int arg_count) {
-    if (arg_count != 1 && arg_count != 2) {
-        fprintf(stderr, "round() takes 1 or 2 arguments\n");
-        exit(1);
-    }
-    double val = value_to_double_interp(args[0]);
-    int digits = 0;
-    if (arg_count == 2) {
-        digits = (int)value_to_double_interp(args[1]);
-        if (digits < 0) digits = 0;
-    }
-    double scale = pow(10.0, digits);
-    double res = round(val * scale) / scale;
-    return create_float_value(res);
-}
-
-static Value *builtin_pow_val(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "pow() takes exactly 2 arguments\n");
-        exit(1);
-    }
-    return create_float_value(pow(value_to_double_interp(args[0]), value_to_double_interp(args[1])));
-}
-
-static Value *builtin_random_val(Value **args, int arg_count) {
-    double r = (double)rand() / (double)RAND_MAX;
-    if (arg_count == 0) {
-        return create_float_value(r);
-    } else if (arg_count == 2) {
-        double min = value_to_double_interp(args[0]);
-        double max = value_to_double_interp(args[1]);
-        return create_float_value(min + r * (max - min));
-    } else {
-        fprintf(stderr, "random() takes 0 or 2 arguments\n");
-        exit(1);
-    }
-}
-
-static Value *builtin_str(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "str() takes exactly 1 argument\n");
-        exit(1);
-    }
-    Value *v = args[0];
-    char buf[256];
-    if (v->type == VAL_STRING) return v;
-    if (v->type == VAL_INT) {
-        sprintf(buf, "%d", v->data.int_val);
-        return create_string_value(buf);
-    }
-    if (v->type == VAL_FLOAT) {
-        sprintf(buf, "%g", v->data.float_val);
-        return create_string_value(buf);
-    }
-    if (v->type == VAL_BOOL) {
-        return create_string_value(v->data.bool_val ? "true" : "false");
-    }
-    if (v->type == VAL_NULL) {
-        return create_string_value("null");
-    }
-    return create_string_value("");
-}
-
-static Value *builtin_append(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "append() takes exactly 2 arguments\n");
-        exit(1);
-    }
-    if (args[0]->type != VAL_ARRAY) {
-        fprintf(stderr, "append() requires an array\n");
-        exit(1);
-    }
-    array_append(args[0]->data.array_val, args[1]);
-    return create_null_value();
-}
-
-static Value *builtin_type(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "type() takes exactly 1 argument\n");
-        exit(1);
-    }
-    Value *v = args[0];
-    switch (v->type) {
-        case VAL_INT: return create_string_value("int");
-        case VAL_FLOAT: return create_string_value("float");
-        case VAL_STRING: return create_string_value("string");
-        case VAL_BOOL: return create_string_value("bool");
-        case VAL_ARRAY: return create_string_value("array");
-        case VAL_DICT: return create_string_value("dict");
-        case VAL_FUNC: return create_string_value("function");
-        case VAL_CLASS: return create_string_value("class");
-        case VAL_INSTANCE: {
-            if (v->data.instance_val && v->data.instance_val->class_val) {
-                return create_string_value(v->data.instance_val->class_val->name);
-            }
-            return create_string_value("instance");
-        }
-        case VAL_NULL: return create_string_value("null");
-        default: return create_string_value("unknown");
-    }
-}
-
-static Value *builtin_keys(Value **args, int arg_count) {
-    if (arg_count != 1 || args[0]->type != VAL_DICT) {
-        fprintf(stderr, "keys() requires a dict\n");
-        exit(1);
-    }
-    int count;
-    char **keys = dict_keys(args[0]->data.dict_val, &count);
-    Value *arr = create_array_value();
-    for (int i = 0; i < count; i++) {
-        array_append(arr->data.array_val, create_string_value(keys[i]));
-    }
-    free(keys);
     return arr;
 }
 
-static Value *builtin_values(Value **args, int arg_count) {
-    if (arg_count != 1 || args[0]->type != VAL_DICT) {
-        fprintf(stderr, "values() requires a dict\n");
-        exit(1);
-    }
-    Value *arr = create_array_value();
-    Dict *dict = args[0]->data.dict_val;
-    for (int i = 0; i < HASH_SIZE; i++) {
-        DictEntry *entry = dict->buckets[i];
-        while (entry != NULL) {
-            array_append(arr->data.array_val, entry->value);
-            entry = entry->next;
+static Value eval_dict_literal(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Value dict = make_dict();
+    ASTNodeList *pair = node->data.dict_literal.pairs;
+
+    while (pair) {
+        ASTNode *pair_node = pair->node;
+
+        // Evaluate key (must be string)
+        Value key = eval_expression(pair_node->data.dict_pair.key);
+        if (key.type != TYPE_STRING) {
+            runtime_error("Dictionary key must be a string");
         }
-    }
-    return arr;
-}
 
-static Value *builtin_remove(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "remove() requires 2 arguments\n");
-        exit(1);
-    }
-    Value *target = args[0];
-    Value *key = args[1];
+        // Evaluate value
+        Value val = eval_expression(pair_node->data.dict_pair.value);
 
-    if (target->type == VAL_ARRAY) {
-        if (key->type != VAL_INT) return create_bool_value(0);
-        int idx = key->data.int_val;
-        Array *arr = target->data.array_val;
-        if (idx < 0 || idx >= arr->size) return create_bool_value(0);
-        for (int i = idx; i < arr->size - 1; i++) {
-            arr->elements[i] = arr->elements[i + 1];
-        }
-        arr->size--;
-        return create_bool_value(1);
+        // Set in dict
+        dict = dict_set(dict, key, val);
+        pair = pair->next;
     }
 
-    if (target->type == VAL_DICT) {
-        if (key->type != VAL_STRING) return create_bool_value(0);
-        int removed = dict_delete(target->data.dict_val, key->data.string_val);
-        return create_bool_value(removed);
-    }
-
-    return create_bool_value(0);
-}
-
-static double value_to_double(Value *v) {
-    switch (v->type) {
-        case VAL_INT: return (double)v->data.int_val;
-        case VAL_FLOAT: return v->data.float_val;
-        case VAL_BOOL: return v->data.bool_val ? 1.0 : 0.0;
-        case VAL_STRING: return atof(v->data.string_val);
-        default: return 0.0;
-    }
-}
-
-static Value *builtin_math(Value **args, int arg_count) {
-    if (arg_count < 1 || args[0]->type != VAL_STRING) {
-        fprintf(stderr, "math() first argument must be operation string\n");
-        exit(1);
-    }
-    const char *name = args[0]->data.string_val;
-
-    if (strcmp(name, "sin") == 0 || strcmp(name, "cos") == 0 ||
-        strcmp(name, "asin") == 0 || strcmp(name, "acos") == 0 ||
-        strcmp(name, "log") == 0 || strcmp(name, "exp") == 0 ||
-        strcmp(name, "ceil") == 0 || strcmp(name, "floor") == 0 ||
-        strcmp(name, "sqrt") == 0 ||
-        strcmp(name, "round") == 0) {
-        if (arg_count != 2) {
-            fprintf(stderr, "math(%s) requires 1 argument\n", name);
-            exit(1);
-        }
-        double val = value_to_double(args[1]);
-        double res;
-        if (strcmp(name, "sin") == 0) res = sin(val);
-        else if (strcmp(name, "cos") == 0) res = cos(val);
-        else if (strcmp(name, "asin") == 0) res = asin(val);
-        else if (strcmp(name, "acos") == 0) res = acos(val);
-        else if (strcmp(name, "log") == 0) res = log(val);
-        else if (strcmp(name, "exp") == 0) res = exp(val);
-        else if (strcmp(name, "ceil") == 0) res = ceil(val);
-        else if (strcmp(name, "floor") == 0) res = floor(val);
-        else if (strcmp(name, "sqrt") == 0) res = sqrt(val);
-        else res = round(val);
-        return create_float_value(res);
-    }
-
-    if (strcmp(name, "pow") == 0) {
-        if (arg_count != 3) {
-            fprintf(stderr, "math(pow) requires 2 arguments\n");
-            exit(1);
-        }
-        double a = value_to_double(args[1]);
-        double b = value_to_double(args[2]);
-        return create_float_value(pow(a, b));
-    }
-
-    if (strcmp(name, "random") == 0) {
-        if (arg_count == 1) {
-            double r = (double)rand() / (double)RAND_MAX;
-            return create_float_value(r);
-        }
-        if (arg_count == 3) {
-            double a = value_to_double(args[1]);
-            double b = value_to_double(args[2]);
-            double r = (double)rand() / (double)RAND_MAX;
-            return create_float_value(a + (b - a) * r);
-        }
-        fprintf(stderr, "math(random) requires 0 or 2 arguments\n");
-        exit(1);
-    }
-
-    fprintf(stderr, "math(): unsupported op %s\n", name);
-    exit(1);
-}
-
-/* JSON helpers */
-static int json_error = 0;
-
-static const char* skip_ws(const char *p) {
-    while (*p && isspace((unsigned char)*p)) p++;
-    return p;
-}
-
-static Value *parse_json_value(const char **p);
-
-static Value *parse_json_string(const char **p) {
-    if (**p != '"' && **p != '\'') { json_error = 1; return create_null_value(); }
-    const char quote = **p;
-    (*p)++; // skip quote
-    char buffer[4096];
-    int idx = 0;
-    while (**p && **p != quote) {
-        if (**p == '\\') {
-            (*p)++;
-            char esc = **p;
-            switch (esc) {
-                case '"': buffer[idx++] = '"'; break;
-                case '\'': buffer[idx++] = '\''; break;
-                case '\\': buffer[idx++] = '\\'; break;
-                case 'n': buffer[idx++] = '\n'; break;
-                case 't': buffer[idx++] = '\t'; break;
-                case 'r': buffer[idx++] = '\r'; break;
-                default: buffer[idx++] = esc; break;
-            }
-        } else {
-            buffer[idx++] = **p;
-        }
-        (*p)++;
-        if (idx >= 4095) break;
-    }
-    buffer[idx] = '\0';
-    if (**p == quote) {
-        (*p)++; // consume closing
-    } else {
-        json_error = 1; // unterminated string
-    }
-    return create_string_value(buffer);
-}
-
-static Value *parse_json_number(const char **p) {
-    char *endptr;
-    double d = strtod(*p, &endptr);
-    int is_float = 0;
-    for (const char *q = *p; q < endptr; q++) {
-        if (*q == '.' || *q == 'e' || *q == 'E') { is_float = 1; break; }
-    }
-    *p = endptr;
-    if (is_float) return create_float_value(d);
-    return create_int_value((int)d);
-}
-
-static int match_word(const char **p, const char *word) {
-    const char *s = *p;
-    while (*word) {
-        if (tolower((unsigned char)*s) != tolower((unsigned char)*word)) return 0;
-        s++; word++;
-    }
-    *p = s;
-    return 1;
-}
-
-static Value *parse_json_array(const char **p) {
-    if (**p != '[') { json_error = 1; return create_null_value(); }
-    (*p)++; // skip '['
-    Value *arr = create_array_value();
-    *p = skip_ws(*p);
-    if (**p == ']') { (*p)++; return arr; }
-    int closed = 0;
-    while (**p) {
-        Value *val = parse_json_value(p);
-        array_append(arr->data.array_val, val);
-        *p = skip_ws(*p);
-        if (**p == ',') {
-            (*p)++;
-            *p = skip_ws(*p);
-            if (**p == ']') { (*p)++; closed = 1; break; }
-            continue;
-        } else if (**p == ']') { (*p)++; closed = 1; break; }
-        else { json_error = 1; break; }
-    }
-    if (!closed) json_error = 1;
-    return arr;
-}
-
-static Value *parse_json_object(const char **p) {
-    if (**p != '{') { json_error = 1; return create_null_value(); }
-    (*p)++; // skip '{'
-    Value *dict = create_dict_value();
-    *p = skip_ws(*p);
-    if (**p == '}') { (*p)++; return dict; }
-    int closed = 0;
-    while (**p) {
-        *p = skip_ws(*p);
-        if (**p != '"' && **p != '\'') { json_error = 1; break; }
-        Value *key = parse_json_string(p);
-        *p = skip_ws(*p);
-        if (**p == ':') (*p)++;
-        else { json_error = 1; break; }
-        *p = skip_ws(*p);
-        Value *val = parse_json_value(p);
-        dict_set(dict->data.dict_val, key->data.string_val, val);
-        *p = skip_ws(*p);
-        if (**p == ',') {
-            (*p)++;
-            *p = skip_ws(*p);
-            if (**p == '}') { (*p)++; closed = 1; break; }
-            continue;
-        } else if (**p == '}') { (*p)++; closed = 1; break; }
-        else { json_error = 1; break; }
-    }
-    if (!closed) json_error = 1;
     return dict;
 }
 
-static Value *parse_json_value(const char **p) {
-    *p = skip_ws(*p);
-    char c = **p;
-    if (c == '"' || c == '\'') return parse_json_string(p);
-    if (c == '[') return parse_json_array(p);
-    if (c == '{') return parse_json_object(p);
-    if (isdigit((unsigned char)c) || c == '-' ) return parse_json_number(p);
-    if (match_word(p, "true")) return create_bool_value(1);
-    if (match_word(p, "false")) return create_bool_value(0);
-    if (match_word(p, "null")) return create_null_value();
-    json_error = 1;
-    return create_null_value();
+static Value eval_identifier(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+    return env_get(current_env, node->data.identifier.name);
 }
 
-static void sb_append(char **buf, int *len, int *cap, const char *s) {
-    int slen = strlen(s);
-    if (*len + slen + 1 > *cap) {
-        *cap = (*cap + slen + 256);
-        *buf = realloc(*buf, *cap);
+static int is_truthy(Value v) {
+    if (v.type == TYPE_BOOL) return (int)v.data;
+    if (v.type == TYPE_NULL) return 0;
+    if (v.type == TYPE_INT) return v.data != 0;
+    if (v.type == TYPE_FLOAT) {
+        double d = *(double*)&v.data;
+        return d != 0.0;
     }
-    memcpy(*buf + *len, s, slen);
-    *len += slen;
-    (*buf)[*len] = '\0';
+    if (v.type == TYPE_STRING) {
+        char *str = (char*)v.data;
+        return str && strlen(str) > 0;
+    }
+    if (v.type == TYPE_ARRAY) {
+        Array *arr = (Array*)v.data;
+        return arr && arr->size > 0;
+    }
+    if (v.type == TYPE_DICT) {
+        Dict *dict = (Dict*)v.data;
+        return dict && dict->size > 0;
+    }
+    return 1;
 }
 
-static void json_serialize_value(Value *v, char **buf, int *len, int *cap);
+static Value eval_binary_op(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
 
-static void json_serialize_string(const char *s, char **buf, int *len, int *cap) {
-    sb_append(buf, len, cap, "\"");
-    while (*s) {
-        if (*s == '"' || *s == '\\') {
-            char esc[3] = {'\\', *s, '\0'};
-            sb_append(buf, len, cap, esc);
-        } else if (*s == '\n') {
-            sb_append(buf, len, cap, "\\n");
-        } else if (*s == '\t') {
-            sb_append(buf, len, cap, "\\t");
+    Operator op = node->data.binary_op.op;
+
+    // Short-circuit evaluation for logical operators
+    if (op == OP_AND) {
+        Value left = eval_expression(node->data.binary_op.left);
+        if (!is_truthy(left)) {
+            return (Value){TYPE_BOOL, 0};
+        }
+        Value right = eval_expression(node->data.binary_op.right);
+        return (Value){TYPE_BOOL, is_truthy(right) ? 1 : 0};
+    }
+
+    if (op == OP_OR) {
+        Value left = eval_expression(node->data.binary_op.left);
+        if (is_truthy(left)) {
+            return (Value){TYPE_BOOL, 1};
+        }
+        Value right = eval_expression(node->data.binary_op.right);
+        return (Value){TYPE_BOOL, is_truthy(right) ? 1 : 0};
+    }
+
+    // Handle IN and NOT_IN operators
+    if (op == OP_IN) {
+        Value left = eval_expression(node->data.binary_op.left);
+        Value right = eval_expression(node->data.binary_op.right);
+        return in_operator(left, right, node->line, node->file);
+    }
+
+    if (op == OP_NOT_IN) {
+        Value left = eval_expression(node->data.binary_op.left);
+        Value right = eval_expression(node->data.binary_op.right);
+        return not_in_operator(left, right, node->line, node->file);
+    }
+
+    // Regular operators - evaluate both sides
+    Value left = eval_expression(node->data.binary_op.left);
+    Value right = eval_expression(node->data.binary_op.right);
+
+    // Use runtime.c's binary_op function
+    return binary_op(left, (int)op, right, node->line, node->file);
+}
+
+static Value eval_unary_op(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Operator op = node->data.unary_op.op;
+    Value operand = eval_expression(node->data.unary_op.operand);
+
+    if (op == OP_NEG) {
+        if (operand.type == TYPE_INT) {
+            return (Value){TYPE_INT, -operand.data};
+        } else if (operand.type == TYPE_FLOAT) {
+            double d = *(double*)&operand.data;
+            d = -d;
+            return (Value){TYPE_FLOAT, *(long*)&d};
         } else {
-            char ch[2] = {*s, '\0'};
-            sb_append(buf, len, cap, ch);
+            runtime_error("Unary minus requires a number");
         }
-        s++;
+    } else if (op == OP_NOT) {
+        return (Value){TYPE_BOOL, is_truthy(operand) ? 0 : 1};
     }
-    sb_append(buf, len, cap, "\"");
+
+    runtime_error("Unknown unary operator");
 }
 
-static void json_serialize_value(Value *v, char **buf, int *len, int *cap) {
-    switch (v->type) {
-        case VAL_INT: {
-            char tmp[64]; sprintf(tmp, "%d", v->data.int_val);
-            sb_append(buf, len, cap, tmp);
-            break;
+static Value eval_index_access(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Value obj = eval_expression(node->data.index_access.object);
+    Value index = eval_expression(node->data.index_access.index);
+
+    // Use runtime.c's index_get
+    return index_get(obj, index);
+}
+
+static Value eval_slice_access(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Value obj = eval_expression(node->data.slice_access.object);
+    Value start = eval_expression(node->data.slice_access.start);
+    Value end = eval_expression(node->data.slice_access.end);
+
+    // Use runtime.c's slice_access
+    return slice_access(obj, start, end);
+}
+
+static Value eval_member_access(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Value obj = eval_expression(node->data.member_access.object);
+
+    if (obj.type != TYPE_INSTANCE) {
+        runtime_error("Member access requires an instance");
+    }
+
+    Instance *inst = (Instance*)obj.data;
+    char *member_name = node->data.member_access.member;
+
+    // Create a string Value for the field name
+    char *field_key = gc_alloc(TYPE_STRING, strlen(member_name) + 1);
+    strcpy(field_key, member_name);
+    Value field_name = {TYPE_STRING, (long)field_key};
+
+    // Use index_get on the fields dict
+    return index_get(inst->fields, field_name);
+}
+
+static Value eval_function_call(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    char *func_name = node->data.func_call.name;
+
+    // Count arguments
+    int arg_count = 0;
+    ASTNodeList *arg_node = node->data.func_call.arguments;
+    while (arg_node) {
+        arg_count++;
+        arg_node = arg_node->next;
+    }
+
+    // Evaluate arguments
+    Value *args = NULL;
+    if (arg_count > 0) {
+        args = gc_alloc(TYPE_ARRAY, arg_count * sizeof(Value));
+        arg_node = node->data.func_call.arguments;
+        for (int i = 0; i < arg_count; i++) {
+            args[i] = eval_expression(arg_node->node);
+            arg_node = arg_node->next;
         }
-        case VAL_FLOAT: {
-            char tmp[64]; sprintf(tmp, "%.3g", v->data.float_val);
-            sb_append(buf, len, cap, tmp);
-            break;
-        }
-        case VAL_BOOL:
-            sb_append(buf, len, cap, v->data.bool_val ? "true" : "false");
-            break;
-        case VAL_NULL:
-            sb_append(buf, len, cap, "null");
-            break;
-        case VAL_STRING:
-            json_serialize_string(v->data.string_val, buf, len, cap);
-            break;
-        case VAL_ARRAY: {
-            sb_append(buf, len, cap, "[");
-            Array *arr = v->data.array_val;
-            for (int i = 0; i < arr->size; i++) {
-                json_serialize_value(arr->elements[i], buf, len, cap);
-                if (i < arr->size - 1) sb_append(buf, len, cap, ",");
-            }
-            sb_append(buf, len, cap, "]");
-            break;
-        }
-        case VAL_DICT: {
-            sb_append(buf, len, cap, "{");
-            int first = 1;
-            for (int i = 0; i < HASH_SIZE; i++) {
-                DictEntry *entry = v->data.dict_val->buckets[i];
-                while (entry) {
-                    if (!first) sb_append(buf, len, cap, ",");
-                    first = 0;
-                    json_serialize_string(entry->key, buf, len, cap);
-                    sb_append(buf, len, cap, ":");
-                    json_serialize_value(entry->value, buf, len, cap);
-                    entry = entry->next;
-                }
-            }
-            sb_append(buf, len, cap, "}");
-            break;
-        }
-        default:
-            sb_append(buf, len, cap, "null");
-    }
-}
-
-static Value *builtin_json_decode(Value **args, int arg_count) {
-    if (arg_count != 1 || args[0]->type != VAL_STRING) {
-        fprintf(stderr, "json_decode expects 1 string argument\n");
-        exit(1);
-    }
-    json_error = 0;
-    const char *p = args[0]->data.string_val;
-    Value *v = parse_json_value(&p);
-    p = skip_ws(p);
-    if (*p != '\0') json_error = 1;
-    if (json_error) {
-        Value *msg = create_string_value("Invalid JSON string");
-        raise_exception(msg, "<builtin>", 0);
-        return create_null_value();
-    }
-    return v;
-}
-
-static Value *builtin_json_encode(Value **args, int arg_count) {
-    if (arg_count != 1) {
-        fprintf(stderr, "json_encode expects 1 argument\n");
-        exit(1);
-    }
-    char *buf = malloc(256);
-    buf[0] = '\0';
-    int len = 0, cap = 256;
-    json_serialize_value(args[0], &buf, &len, &cap);
-    Value *res = create_string_value(buf);
-    return res;
-}
-
-static Value *builtin_input(Value **args, int arg_count) {
-    char buffer[1024];
-    if (arg_count > 0 && args[0]->type == VAL_STRING) {
-        printf("%s", args[0]->data.string_val);
-    }
-    if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
-        // Remove newline if present
-        size_t len = strlen(buffer);
-        if (len > 0 && buffer[len-1] == '\n') {
-            buffer[len-1] = '\0';
-        }
-        return create_string_value(buffer);
-    }
-    return create_string_value("");
-}
-
-static Value *builtin_file_read(Value **args, int arg_count) {
-    if (arg_count != 1 || args[0]->type != VAL_STRING) {
-        fprintf(stderr, "file_read() requires a filename string\n");
-        exit(1);
     }
 
-    FILE *fp = fopen(args[0]->data.string_val, "r");
-    if (fp == NULL) {
-        return create_string_value("");
-    }
-
-    fseek(fp, 0, SEEK_END);
-    long fsize = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
-
-    char *content = malloc(fsize + 1);
-    fread(content, 1, fsize, fp);
-    content[fsize] = '\0';
-    fclose(fp);
-
-    return create_string_value(content);
-}
-
-static void write_content(FILE *fp, Value *content) {
-    if (content->type == VAL_STRING) {
-        fprintf(fp, "%s", content->data.string_val);
-    } else if (content->type == VAL_INT) {
-        fprintf(fp, "%d", content->data.int_val);
-    } else if (content->type == VAL_FLOAT) {
-        fprintf(fp, "%g", content->data.float_val);
-    } else {
-        fprintf(fp, "%s", content->data.bool_val ? "true" : "false");
-    }
-}
-
-static Value *builtin_file_write(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "file_write() requires content and filename\n");
-        exit(1);
-    }
-    if (args[1]->type != VAL_STRING) {
-        fprintf(stderr, "file_write() filename must be a string\n");
-        exit(1);
-    }
-
-    FILE *fp = fopen(args[1]->data.string_val, "w");
-    if (fp == NULL) {
-        return create_int_value(0);
-    }
-    write_content(fp, args[0]);
-    fclose(fp);
-    return create_int_value(1);
-}
-
-static Value *builtin_file_append(Value **args, int arg_count) {
-    if (arg_count != 2 || args[1]->type != VAL_STRING) {
-        fprintf(stderr, "file_append() requires content and filename\n");
-        exit(1);
-    }
-    FILE *fp = fopen(args[1]->data.string_val, "a");
-    if (fp == NULL) {
-        return create_int_value(0);
-    }
-    write_content(fp, args[0]);
-    fclose(fp);
-    return create_int_value(1);
-}
-
-static Value *builtin_file_size(Value **args, int arg_count) {
-    if (arg_count != 1 || args[0]->type != VAL_STRING) {
-        fprintf(stderr, "file_size() requires a filename\n");
-        exit(1);
-    }
-    FILE *fp = fopen(args[0]->data.string_val, "rb");
-    if (fp == NULL) return create_int_value(0);
-    fseek(fp, 0, SEEK_END);
-    long sz = ftell(fp);
-    fclose(fp);
-    return create_int_value((int)sz);
-}
-
-static Value *builtin_file_exist(Value **args, int arg_count) {
-    if (arg_count != 1 || args[0]->type != VAL_STRING) {
-        fprintf(stderr, "file_exist() requires a filename\n");
-        exit(1);
-    }
-    FILE *fp = fopen(args[0]->data.string_val, "rb");
-    if (fp == NULL) return create_bool_value(0);
-    fclose(fp);
-    return create_bool_value(1);
-}
-
-
-static Value *builtin_regexp_match(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "regexp_match() requires pattern and string\n");
-        exit(1);
-    }
-    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING) {
-        fprintf(stderr, "regexp_match() requires two string arguments\n");
-        exit(1);
-    }
-
-    char *pattern = args[0]->data.string_val;
-    char *str = args[1]->data.string_val;
-
-    regex_t regex;
-    int ret = regcomp(&regex, pattern, REG_EXTENDED);
-    if (ret != 0) {
-        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
-        regfree(&regex);
-        return create_int_value(0);
-    }
-
-    ret = regexec(&regex, str, 0, NULL, 0);
-    regfree(&regex);
-
-    return create_int_value((ret == 0) ? 1 : 0);
-}
-
-static Value *builtin_regexp_find(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "regexp_find() requires pattern and string\n");
-        exit(1);
-    }
-    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING) {
-        fprintf(stderr, "regexp_find() requires two string arguments\n");
-        exit(1);
-    }
-
-    char *pattern = args[0]->data.string_val;
-    char *str = args[1]->data.string_val;
-
-    regex_t regex;
-    int ret = regcomp(&regex, pattern, REG_EXTENDED);
-    if (ret != 0) {
-        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
-        regfree(&regex);
-        return create_array_value();
-    }
-
-    // Get number of capture groups
-    size_t num_groups = regex.re_nsub + 1;  // +1 for the whole match
-    regmatch_t *matches = (regmatch_t*)malloc(num_groups * sizeof(regmatch_t));
-
-    // Find all matches
-    Value *result = create_array_value();
-    char *search_str = str;
-
-    while (regexec(&regex, search_str, num_groups, matches, 0) == 0) {
-        // If there are capture groups, return only the captured parts
-        // Otherwise return the whole match
-        int start_idx = (num_groups > 1) ? 1 : 0;  // Skip whole match if we have groups
-
-        for (size_t i = start_idx; i < num_groups; i++) {
-            if (matches[i].rm_so == -1) continue;  // This group didn't match
-
-            int match_len = matches[i].rm_eo - matches[i].rm_so;
-            char *matched = (char*)malloc(match_len + 1);
-            strncpy(matched, search_str + matches[i].rm_so, match_len);
-            matched[match_len] = '\0';
-
-            // Add to result array
-            Value *matched_val = create_string_value(matched);
-            array_append(result->data.array_val, matched_val);
+    // Map built-in function names to runtime.c functions
+    #define BUILTIN1(name, func) \
+        if (strcmp(func_name, name) == 0) { \
+            if (arg_count != 1) runtime_error("%s requires 1 argument", name); \
+            return func(args[0]); \
         }
 
-        // Move to next position after the whole match
-        int advance = matches[0].rm_eo;
-        if (advance == 0) {
-            if (*search_str == '\0') break;
-            search_str++;
+    #define BUILTIN2(name, func) \
+        if (strcmp(func_name, name) == 0) { \
+            if (arg_count != 2) runtime_error("%s requires 2 arguments", name); \
+            return func(args[0], args[1]); \
+        }
+
+    #define BUILTIN3(name, func) \
+        if (strcmp(func_name, name) == 0) { \
+            if (arg_count != 3) runtime_error("%s requires 3 arguments", name); \
+            return func(args[0], args[1], args[2]); \
+        }
+
+    // I/O functions
+    if (strcmp(func_name, "print") == 0) {
+        for (int i = 0; i < arg_count; i++) {
+            print_value(args[i]);
+            if (i < arg_count - 1) printf(" ");
+        }
+        return make_null();
+    }
+    if (strcmp(func_name, "println") == 0) {
+        for (int i = 0; i < arg_count; i++) {
+            print_value(args[i]);
+            if (i < arg_count - 1) printf(" ");
+        }
+        printf("\n");
+        return make_null();
+    }
+
+    // Type conversion (1 arg)
+    BUILTIN1("int", to_int)
+    BUILTIN1("float", to_float)
+    BUILTIN1("str", to_string)
+    BUILTIN1("type", type)
+
+    // Array/Dict/String operations
+    BUILTIN1("len", len)
+    BUILTIN2("append", append)
+    BUILTIN2("remove", remove_entry)
+    BUILTIN2("split", str_split)
+    BUILTIN2("str_split", str_split)
+    BUILTIN2("join", str_join)
+    BUILTIN2("str_join", str_join)
+    BUILTIN1("keys", keys)
+
+    // str_trim (1 or 2 args)
+    if (strcmp(func_name, "str_trim") == 0) {
+        if (arg_count == 1) {
+            return str_trim(args[0], make_null());
+        } else if (arg_count == 2) {
+            return str_trim(args[0], args[1]);
         } else {
-            search_str += advance;
+            runtime_error("str_trim requires 1 or 2 arguments");
         }
     }
 
-    free(matches);
-    regfree(&regex);
-    return result;
-}
-
-static Value *builtin_regexp_replace(Value **args, int arg_count) {
-    if (arg_count != 3) {
-        fprintf(stderr, "regexp_replace() requires pattern, string, and replacement\n");
-        exit(1);
-    }
-    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING || args[2]->type != VAL_STRING) {
-        fprintf(stderr, "regexp_replace() requires three string arguments\n");
-        exit(1);
+    // str_format (variable args)
+    if (strcmp(func_name, "str_format") == 0) {
+        if (arg_count == 0) runtime_error("str_format requires at least 1 argument");
+        return str_format(args[0], args + 1, arg_count - 1);
     }
 
-    char *pattern = args[0]->data.string_val;
-    char *str = args[1]->data.string_val;
-    char *replacement = args[2]->data.string_val;
+    // I/O
+    BUILTIN1("input", input)
+    BUILTIN1("read", file_read)
+    BUILTIN2("write", file_write)
+    BUILTIN1("file_read", file_read)
+    BUILTIN2("file_write", file_write)
+    BUILTIN2("file_append", file_append)
+    BUILTIN1("file_size", file_size)
+    BUILTIN1("file_exist", file_exist)
 
-    regex_t regex;
-    int ret = regcomp(&regex, pattern, REG_EXTENDED);
-    if (ret != 0) {
-        fprintf(stderr, "Failed to compile regex: %s\n", pattern);
-        regfree(&regex);
-        return create_string_value(strdup(str));
-    }
+    // Math (1 arg)
+    BUILTIN1("sin", math_sin)
+    BUILTIN1("cos", math_cos)
+    BUILTIN1("asin", math_asin)
+    BUILTIN1("acos", math_acos)
+    BUILTIN1("log", math_log)
+    BUILTIN1("sqrt", math_sqrt)
+    BUILTIN1("exp", math_exp)
+    BUILTIN1("ceil", math_ceil)
+    BUILTIN1("floor", math_floor)
 
-    size_t num_groups = regex.re_nsub + 1;
-    regmatch_t *matches = malloc(sizeof(regmatch_t) * num_groups);
-
-    // Build result string (dynamic buffer)
-    size_t cap = 4096;
-    size_t result_pos = 0;
-    char *result_str = malloc(cap);
-    result_str[0] = '\0';
-
-    char *search_str = str;
-
-    while (regexec(&regex, search_str, num_groups, matches, 0) == 0) {
-        // Copy text before match
-        int pre_len = matches[0].rm_so;
-        if (result_pos + pre_len + 1 >= cap) {
-            cap = cap + pre_len + 256;
-            result_str = realloc(result_str, cap);
-        }
-        strncat(result_str, search_str, pre_len);
-        result_pos += pre_len;
-
-        // Expand replacement with backreferences \1..\9
-        for (const char *rp = replacement; *rp; rp++) {
-            if (*rp == '\\' && rp[1] >= '0' && rp[1] <= '9') {
-                int idx = rp[1] - '0';
-                if (idx < (int)num_groups && matches[idx].rm_so != -1) {
-                    int mlen = matches[idx].rm_eo - matches[idx].rm_so;
-                    if (result_pos + mlen + 1 >= cap) {
-                        cap = cap + mlen + 256;
-                        result_str = realloc(result_str, cap);
-                    }
-                    strncat(result_str, search_str + matches[idx].rm_so, mlen);
-                    result_pos += mlen;
-                }
-                rp++; // skip digit
-            } else {
-                if (result_pos + 2 >= cap) {
-                    cap *= 2;
-                    result_str = realloc(result_str, cap);
-                }
-                result_str[result_pos++] = *rp;
-                result_str[result_pos] = '\0';
-            }
-        }
-
-        // Move to next position
-        search_str += matches[0].rm_eo;
-
-        // Prevent infinite loop on zero-length matches
-        if (matches[0].rm_eo == 0) {
-            if (*search_str == '\0') break;
-            if (result_pos + 2 >= cap) {
-                cap *= 2;
-                result_str = realloc(result_str, cap);
-            }
-            result_str[result_pos++] = *search_str;
-            result_str[result_pos] = '\0';
-            search_str++;
-        }
-    }
-
-    // Copy remaining text
-    size_t remain = strlen(search_str);
-    if (result_pos + remain + 1 >= cap) {
-        cap = result_pos + remain + 1;
-        result_str = realloc(result_str, cap);
-    }
-    strcat(result_str, search_str);
-
-    free(matches);
-
-    regfree(&regex);
-    return create_string_value(result_str);
-}
-
-static Value *builtin_str_split(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "str_split() requires string and separator\n");
-        exit(1);
-    }
-    if (args[0]->type != VAL_STRING || args[1]->type != VAL_STRING) {
-        fprintf(stderr, "str_split() requires two string arguments\n");
-        exit(1);
-    }
-
-    char *str = args[0]->data.string_val;
-    char *separator = args[1]->data.string_val;
-    int sep_len = strlen(separator);
-
-    if (sep_len == 0) {
-        fprintf(stderr, "str_split separator cannot be empty\n");
-        exit(1);
-    }
-
-    Value *result = create_array_value();
-    char *current = str;
-    char *next;
-
-    while ((next = strstr(current, separator)) != NULL) {
-        // Extract substring before separator
-        int len = next - current;
-        char *part = (char*)malloc(len + 1);
-        strncpy(part, current, len);
-        part[len] = '\0';
-
-        // Add to result array
-        Value *part_val = create_string_value(part);
-        array_append(result->data.array_val, part_val);
-
-        // Move to position after separator
-        current = next + sep_len;
-    }
-
-    // Add remaining part after last separator
-    Value *last_val = create_string_value(strdup(current));
-    array_append(result->data.array_val, last_val);
-
-    return result;
-}
-
-static Value *builtin_str_join(Value **args, int arg_count) {
-    if (arg_count != 2) {
-        fprintf(stderr, "str_join() requires array and separator\n");
-        exit(1);
-    }
-    if (args[0]->type != VAL_ARRAY || args[1]->type != VAL_STRING) {
-        fprintf(stderr, "str_join() requires array and string separator\n");
-        exit(1);
-    }
-
-    Array *arr = args[0]->data.array_val;
-    char *separator = args[1]->data.string_val;
-
-    // Calculate total length needed
-    int total_len = 0;
-    for (int i = 0; i < arr->size; i++) {
-        Value *elem = arr->elements[i];
-        if (elem->type == VAL_STRING) {
-            total_len += strlen(elem->data.string_val);
-        } else if (elem->type == VAL_INT) {
-            total_len += 20;
+    // Round (1 or 2 args)
+    if (strcmp(func_name, "round") == 0) {
+        if (arg_count == 1) {
+            return math_round(args[0]);
+        } else if (arg_count == 2) {
+            // Round with precision
+            double val = (args[0].type == TYPE_FLOAT) ? *(double*)&args[0].data : (double)args[0].data;
+            long precision = (args[1].type == TYPE_INT) ? args[1].data : 0;
+            double multiplier = pow(10.0, precision);
+            double rounded = round(val * multiplier) / multiplier;
+            return (Value){TYPE_FLOAT, *(long*)&rounded};
         } else {
-            total_len += 30;
-        }
-        
-        if (i < arr->size - 1) {
-            total_len += strlen(separator);
+            runtime_error("round requires 1 or 2 arguments");
         }
     }
 
-    // Build result string
-    char *result_str = (char*)malloc(total_len + 1);
-    result_str[0] = '\0';
+    // Math (2 args)
+    BUILTIN2("pow", math_pow_val)
 
-    for (int i = 0; i < arr->size; i++) {
-        Value *elem = arr->elements[i];
-        char temp[128];
-        
-        if (elem->type == VAL_STRING) {
-            strcat(result_str, elem->data.string_val);
-        } else if (elem->type == VAL_INT) {
-            sprintf(temp, "%d", elem->data.int_val);
-            strcat(result_str, temp);
-        } else if (elem->type == VAL_FLOAT) {
-            sprintf(temp, "%g", elem->data.float_val);
-            strcat(result_str, temp);
+    // Random (0 or 2 args)
+    if (strcmp(func_name, "random") == 0) {
+        if (arg_count == 0) {
+            return math_random_val(make_null(), make_null(), 0);
+        } else if (arg_count == 2) {
+            return math_random_val(args[0], args[1], 2);
         } else {
-            strcat(result_str, "<object>");
-        }
-
-        if (i < arr->size - 1) {
-            strcat(result_str, separator);
+            runtime_error("random requires 0 or 2 arguments");
         }
     }
 
-    return create_string_value(result_str);
+    // JSON (1 arg)
+    BUILTIN1("json_parse", json_decode)
+    BUILTIN1("json_decode", json_decode)
+    BUILTIN1("json_stringify", json_encode)
+    BUILTIN1("json_encode", json_encode)
+
+    // Regex (2 args for match/find, 3 for replace)
+    BUILTIN2("regex_match", regexp_match)
+    BUILTIN2("regexp_match", regexp_match)
+    BUILTIN3("regex_replace", regexp_replace)
+    BUILTIN3("regexp_replace", regexp_replace)
+    BUILTIN2("regex_find", regexp_find)
+    BUILTIN2("regexp_find", regexp_find)
+
+    // GC
+    if (strcmp(func_name, "gc_run") == 0) {
+        return gc_run();
+    }
+    if (strcmp(func_name, "gc_stats") == 0) {
+        gc_print_stats();
+        return make_null();
+    }
+
+    // User-defined function
+    if (env_exists(current_env, func_name)) {
+        Value func_val = env_get(current_env, func_name);
+
+        if (func_val.type == TYPE_CLASS) {
+            // Constructor call (via function syntax)
+            runtime_error("Use 'new' to instantiate a class");
+        }
+
+        // It's a user function stored in the environment
+        Function *func = (Function*)func_val.data;
+        return call_function(func, args, arg_count);
+    }
+
+    runtime_error("Undefined function: %s", func_name);
 }
 
-static Value *builtin_str_trim(Value **args, int arg_count) {
-    if (arg_count < 1 || arg_count > 2 || args[0]->type != VAL_STRING || (arg_count == 2 && args[1]->type != VAL_STRING)) {
-        fprintf(stderr, "str_trim(str, [chars]) expects string args\n");
-        exit(1);
-    }
-    const char *s = args[0]->data.string_val;
-    const char *chars = (arg_count == 2) ? args[1]->data.string_val : " \t\n";
-    int start = 0;
-    int end = strlen(s) - 1;
-    while (start <= end && strchr(chars, s[start])) start++;
-    while (end >= start && strchr(chars, s[end])) end--;
-    int len = end - start + 1;
-    if (len < 0) len = 0;
-    char *out = malloc(len + 1);
-    strncpy(out, s + start, len);
-    out[len] = '\0';
-    return create_string_value(out);
-}
-
-static Value *builtin_str_format(Value **args, int arg_count) {
-    if (arg_count < 1 || args[0]->type != VAL_STRING) {
-        fprintf(stderr, "str_format requires format string\n");
-        exit(1);
-    }
-    const char *fmt = args[0]->data.string_val;
-    int ai = 1;
-    int cap = 256, len = 0;
-    char *buf = malloc(cap);
-    for (const char *p = fmt; *p; p++) {
-        if (*p != '%') {
-            if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); }
-            buf[len++] = *p;
-            continue;
-        }
-        p++;
-        if (*p == '%') { if (len >= cap - 1) { cap *= 2; buf = realloc(buf, cap); } buf[len++] = '%'; continue; }
-        int precision = -1;
-        if (*p == '.') {
-            p++;
-            precision = 0;
-            while (*p >= '0' && *p <= '9') { precision = precision * 10 + (*p - '0'); p++; }
-        }
-        if (ai >= arg_count) { fprintf(stderr, "str_format: not enough args\n"); exit(1); }
-        Value *v = args[ai++];
-        char tmp[256];
-        if (*p == 'd') {
-            long iv = (v->type == VAL_INT) ? v->data.int_val : (long)value_to_double_interp(v);
-            snprintf(tmp, sizeof(tmp), "%ld", iv);
-        } else if (*p == 'f') {
-            double dv = value_to_double_interp(v);
-            if (precision >= 0) {
-                char fmtbuf[16];
-                snprintf(fmtbuf, sizeof(fmtbuf), "%%.%df", precision);
-                snprintf(tmp, sizeof(tmp), fmtbuf, dv);
-            } else {
-                snprintf(tmp, sizeof(tmp), "%f", dv);
-            }
-        } else if (*p == 's') {
-            const char *sv = v->type == VAL_STRING ? v->data.string_val : "";
-            if (precision >= 0) snprintf(tmp, sizeof(tmp), "%.*s", precision, sv);
-            else snprintf(tmp, sizeof(tmp), "%s", sv);
-        } else {
-            fprintf(stderr, "str_format: unsupported specifier %%%c\n", *p);
-            exit(1);
-        }
-        int tlen = strlen(tmp);
-        while (len + tlen >= cap) { cap *= 2; buf = realloc(buf, cap); }
-        memcpy(buf + len, tmp, tlen);
-        len += tlen;
-    }
-    buf[len] = '\0';
-    return create_string_value(buf);
-}
-
-static Value *builtin_cmd_args(Value **args, int arg_count) {
-    Value *result = create_array_value();
-    // Start from index 2 to skip the program name (argv[0]) and script name (argv[1])
-    for (int i = 2; i < g_argc; i++) {
-        array_append(result->data.array_val, create_string_value(g_argv[i]));
-    }
-    return result;
-}
-
-static void setup_builtins() {
-    env_define(global_env, "print", create_builtin_value(builtin_print));
-    env_define(global_env, "println", create_builtin_value(builtin_println));
-    env_define(global_env, "len", create_builtin_value(builtin_len));
-    env_define(global_env, "int", create_builtin_value(builtin_int));
-    env_define(global_env, "float", create_builtin_value(builtin_float));
-    env_define(global_env, "str", create_builtin_value(builtin_str));
-    env_define(global_env, "sin", create_builtin_value(builtin_sin));
-    env_define(global_env, "cos", create_builtin_value(builtin_cos));
-    env_define(global_env, "asin", create_builtin_value(builtin_asin));
-    env_define(global_env, "acos", create_builtin_value(builtin_acos));
-    env_define(global_env, "log", create_builtin_value(builtin_log));
-    env_define(global_env, "sqrt", create_builtin_value(builtin_sqrt));
-    env_define(global_env, "exp", create_builtin_value(builtin_exp));
-    env_define(global_env, "ceil", create_builtin_value(builtin_ceil));
-    env_define(global_env, "floor", create_builtin_value(builtin_floor));
-    env_define(global_env, "round", create_builtin_value(builtin_round_val));
-    env_define(global_env, "pow", create_builtin_value(builtin_pow_val));
-    env_define(global_env, "random", create_builtin_value(builtin_random_val));
-    env_define(global_env, "type", create_builtin_value(builtin_type));
-    env_define(global_env, "append", create_builtin_value(builtin_append));
-    env_define(global_env, "keys", create_builtin_value(builtin_keys));
-    env_define(global_env, "values", create_builtin_value(builtin_values));
-    env_define(global_env, "input", create_builtin_value(builtin_input));
-    env_define(global_env, "file_read", create_builtin_value(builtin_file_read));
-    env_define(global_env, "file_write", create_builtin_value(builtin_file_write));
-    env_define(global_env, "file_append", create_builtin_value(builtin_file_append));
-    env_define(global_env, "file_size", create_builtin_value(builtin_file_size));
-    env_define(global_env, "file_exist", create_builtin_value(builtin_file_exist));
-    env_define(global_env, "read", create_builtin_value(builtin_file_read));   // backward compat
-    env_define(global_env, "write", create_builtin_value(builtin_file_write)); // backward compat
-    env_define(global_env, "regexp_match", create_builtin_value(builtin_regexp_match));
-    env_define(global_env, "regexp_find", create_builtin_value(builtin_regexp_find));
-    env_define(global_env, "regexp_replace", create_builtin_value(builtin_regexp_replace));
-    env_define(global_env, "str_split", create_builtin_value(builtin_str_split));
-    env_define(global_env, "str_join", create_builtin_value(builtin_str_join));
-    env_define(global_env, "str_trim", create_builtin_value(builtin_str_trim));
-    env_define(global_env, "str_format", create_builtin_value(builtin_str_format));
-    env_define(global_env, "cmd_args", create_builtin_value(builtin_cmd_args));
-    env_define(global_env, "remove", create_builtin_value(builtin_remove));
-    env_define(global_env, "math", create_builtin_value(builtin_math));
-    env_define(global_env, "json_encode", create_builtin_value(builtin_json_encode));
-    env_define(global_env, "json_decode", create_builtin_value(builtin_json_decode));
-}
-
-static Value *instantiate_class(ClassValue *cls, Value **args, int arg_count) {
-    Value *instance_val = create_instance_value(cls);
-    ClassInstance *instance = instance_val->data.instance_val;
-
-    // Initialize member variables
-    Environment *prev_env = current_env;
-    Environment *init_env = create_environment(cls->env);
-    env_define(init_env, "this", instance_val);
-    env_define(init_env, "self", instance_val);
-    current_env = init_env;
-    push_this(instance);
-    ASTNodeList *m = cls->members;
-    while (m != NULL) {
-        Value *val = eval_expression(m->node->data.var_decl.value);
-        dict_set(instance->fields, m->node->data.var_decl.name, val);
-        m = m->next;
-    }
-    pop_this();
-    current_env = prev_env;
-
-    // Call constructor init if present
-    Function *init_func = find_method(cls, "init");
-    if (init_func != NULL) {
-        // Count params
-        int param_count = 0;
-        ASTNodeList *p = init_func->params;
-        while (p != NULL) {
-            param_count++;
-            p = p->next;
-        }
-        if (param_count != arg_count) {
-            fprintf(stderr, "Constructor for %s expects %d arguments, got %d\n", cls->name, param_count, arg_count);
-            exit(1);
-        }
-        call_method(instance_val, "init", args, arg_count);
-    } else if (arg_count > 0) {
-        fprintf(stderr, "Class %s constructor does not take arguments\n", cls->name);
-        exit(1);
-    }
-
-    return instance_val;
-}
-
-static Value *call_method(Value *instance_val, const char *name, Value **args, int arg_count) {
-    if (instance_val->type != VAL_INSTANCE) {
-        fprintf(stderr, "Method call only valid on class instances\n");
-        exit(1);
-    }
-    ClassInstance *instance = instance_val->data.instance_val;
-    int is_private = name[0] == '_';
-    if (is_private && !is_internal_access(instance)) {
-        fprintf(stderr, "Cannot access private method '%s' of class %s\n", name, instance->class_val->name);
-        exit(1);
-    }
-
-    Function *method = find_method(instance->class_val, name);
-    if (method == NULL) {
-        fprintf(stderr, "Method '%s' not found on class %s\n", name, instance->class_val->name);
-        exit(1);
-    }
-
-    // Count params
+static Value call_function(Function *func, Value *args, int arg_count) {
+    // Count expected parameters
     int param_count = 0;
-    ASTNodeList *p = method->params;
-    while (p != NULL) {
+    ASTNodeList *param = func->params;
+    while (param) {
         param_count++;
-        p = p->next;
-    }
-    if (param_count != arg_count) {
-        fprintf(stderr, "Method %s expects %d arguments, got %d\n", name, param_count, arg_count);
-        exit(1);
+        param = param->next;
     }
 
-    Environment *func_env = create_environment(method->env);
-    env_define(func_env, "this", instance_val);
-    env_define(func_env, "self", instance_val);
+    if (arg_count != param_count) {
+        runtime_error("Function '%s' expects %d arguments, got %d",
+                     func->name, param_count, arg_count);
+    }
+
+    // Create new environment for function
+    Environment *func_env = create_environment(func->env);
+    Environment *saved_env = current_env;
+    current_env = func_env;
 
     // Bind parameters
-    ASTNodeList *param = method->params;
+    param = func->params;
     for (int i = 0; i < arg_count; i++) {
         env_define(func_env, param->node->data.identifier.name, args[i]);
         param = param->next;
     }
 
-    Environment *prev_env = current_env;
-    current_env = func_env;
-    push_this(instance);
-
+    // Execute function body
     has_returned = 0;
-    ASTNodeList *stmt = method->body;
-    while (stmt != NULL && !has_returned) {
-        eval_statement(stmt->node);
-        stmt = stmt->next;
-    }
+    execute_block(func->body);
 
-    pop_this();
-    current_env = prev_env;
+    Value result = has_returned ? return_value : make_null();
+    has_returned = 0;
 
-    if (has_returned) {
-        Value *result = return_value;
-        has_returned = 0;
-        return result;
-    }
-    return create_null_value();
+    current_env = saved_env;
+    return result;
 }
 
-static void execute_block(ASTNodeList *stmts) {
-    Environment *prev_env = current_env;
-    Environment *block_env = create_environment(prev_env);
-    current_env = block_env;
-    ASTNodeList *stmt = stmts;
-    while (stmt != NULL && !has_returned) {
-        eval_statement(stmt->node);
-        stmt = stmt->next;
+// Continue with rest of eval functions in next part...
+static Value eval_method_call(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Value obj = eval_expression(node->data.method_call.object);
+    char *method_name = node->data.method_call.method;
+
+    // Count and evaluate arguments
+    int arg_count = 0;
+    ASTNodeList *arg_node = node->data.method_call.arguments;
+    while (arg_node) {
+        arg_count++;
+        arg_node = arg_node->next;
     }
-    current_env = prev_env;
-}
 
-/* Evaluation functions */
-static int is_truthy(Value *v) {
-    if (v->type == VAL_BOOL) return v->data.bool_val;
-    if (v->type == VAL_NULL) return 0;
-    if (v->type == VAL_INT) return v->data.int_val != 0;
-    if (v->type == VAL_FLOAT) return v->data.float_val != 0.0;
-    if (v->type == VAL_STRING) return strlen(v->data.string_val) > 0;
-    if (v->type == VAL_ARRAY) return v->data.array_val->size > 0;
-    if (v->type == VAL_DICT) return v->data.dict_val->size > 0;
-    return 1;
-}
-
-static int value_in(Value *left, Value *right) {
-    if (right->type == VAL_ARRAY) {
-        Array *arr = right->data.array_val;
-        for (int i = 0; i < arr->size; i++) {
-            Value *elem = arr->elements[i];
-            if (left->type == elem->type) {
-                if (left->type == VAL_INT && left->data.int_val == elem->data.int_val) return 1;
-                if (left->type == VAL_FLOAT && left->data.float_val == elem->data.float_val) return 1;
-                if (left->type == VAL_STRING && strcmp(left->data.string_val, elem->data.string_val) == 0) return 1;
-                if (left->type == VAL_BOOL && left->data.bool_val == elem->data.bool_val) return 1;
-            }
+    Value *args = NULL;
+    if (arg_count > 0) {
+        args = gc_alloc(TYPE_ARRAY, arg_count * sizeof(Value));
+        arg_node = node->data.method_call.arguments;
+        for (int i = 0; i < arg_count; i++) {
+            args[i] = eval_expression(arg_node->node);
+            arg_node = arg_node->next;
         }
-        return 0;
-    } else if (right->type == VAL_DICT) {
-        if (left->type != VAL_STRING) {
-            type_errorf("Dictionary keys must be strings");
-        }
-        Dict *dict = right->data.dict_val;
-        for (int i = 0; i < HASH_SIZE; i++) {
-            DictEntry *entry = dict->buckets[i];
-            while (entry != NULL) {
-                if (strcmp(entry->key, left->data.string_val) == 0) return 1;
-                entry = entry->next;
-            }
-        }
-        return 0;
-    } else if (right->type == VAL_STRING) {
-        if (left->type != VAL_STRING) {
-            type_errorf("Substring for 'in' must be a string");
-        }
-        return strstr(right->data.string_val, left->data.string_val) != NULL;
     }
-    type_errorf("'in' not supported for this type");
+
+    return call_method_internal(obj, method_name, args, arg_count);
 }
 
-static Value *eval_binary_op(Value *left, Operator op, Value *right) {
-    #define TC_TYPE(v) ((v)->type)
-    #define TC_IS_STRING(v) ((v).type == VAL_STRING)
-    #define TC_IS_ARRAY(v) ((v).type == VAL_ARRAY)
-    #define TC_IS_DICT(v) ((v).type == VAL_DICT)
-    #define TC_IS_BOOL(v) ((v).type == VAL_BOOL)
-    #define TC_IS_NUMERIC(v) ((v).type == VAL_INT || (v).type == VAL_FLOAT)
-    #define TC_IS_NULL(v) ((v).type == VAL_NULL)
-    #define TC_ERR(ctx_line, ctx_file, fmt, ...) type_errorf(fmt, ##__VA_ARGS__)
-    #define TC_CTX_LINE (err_line)
-    #define TC_CTX_FILE (err_file)
-    #define REQUIRE_NUMERIC(opname) TC_REQUIRE_NUMERIC((opname), (*left), (*right))
-    #define REQUIRE_BOTH_STRING() TC_REQUIRE_STRING_CONCAT((*left), (*right))
-
-    switch (op) {
-        case OP_ADD:
-            if (left->type == VAL_ARRAY && right->type == VAL_ARRAY) {
-                Value *arr = create_array_value();
-                Array *res = arr->data.array_val;
-                Array *la = left->data.array_val;
-                Array *ra = right->data.array_val;
-                for (int i = 0; i < la->size; i++) {
-                    array_append(res, la->elements[i]);
-                }
-                for (int i = 0; i < ra->size; i++) {
-                    array_append(res, ra->elements[i]);
-                }
-                return arr;
-            }
-            if (left->type == VAL_STRING || right->type == VAL_STRING) {
-                if (!(left->type == VAL_STRING && right->type == VAL_STRING)) {
-                    type_errorf("Type error: string concatenation requires two strings");
-                }
-                char buf[1024];
-                snprintf(buf, sizeof(buf), "%s%s", left->data.string_val, right->data.string_val);
-                return create_string_value(buf);
-            }
-            REQUIRE_NUMERIC("addition");
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_float_value(l + r);
-            }
-            return create_int_value(left->data.int_val + right->data.int_val);
-
-        case OP_SUB:
-            REQUIRE_NUMERIC("subtraction");
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_float_value(l - r);
-            }
-            return create_int_value(left->data.int_val - right->data.int_val);
-
-        case OP_MUL:
-            REQUIRE_NUMERIC("multiplication");
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_float_value(l * r);
-            }
-            return create_int_value(left->data.int_val * right->data.int_val);
-
-        case OP_DIV:
-            REQUIRE_NUMERIC("division");
-            if (left->type == VAL_INT && right->type == VAL_INT) {
-                if (right->data.int_val == 0) {
-                    type_errorf("Division by zero");
-                }
-                return create_int_value(left->data.int_val / right->data.int_val);
-            }
-            double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-            double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-            if (r == 0) {
-                type_errorf("Division by zero");
-            }
-            return create_float_value(l / r);
-
-        case OP_MOD:
-            REQUIRE_NUMERIC("modulo");
-            if (left->type == VAL_FLOAT || right->type == VAL_FLOAT) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_float_value(fmod(l, r));
-            }
-            return create_int_value(left->data.int_val % right->data.int_val);
-
-        case OP_EQ:
-            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_bool_value(l == r);
-            }
-            if (left->type == VAL_STRING && right->type == VAL_STRING)
-                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) == 0);
-            if (left->type == VAL_BOOL && right->type == VAL_BOOL)
-                return create_bool_value(left->data.bool_val == right->data.bool_val);
-            if (left->type == VAL_NULL && right->type == VAL_NULL) return create_bool_value(1);
-            if (left->type == right->type)
-                return create_bool_value(left->data.int_val == right->data.int_val);
-            return create_bool_value(0);
-
-        case OP_NE:
-            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_bool_value(l != r);
-            }
-            if (left->type == VAL_STRING && right->type == VAL_STRING)
-                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) != 0);
-            if (left->type == VAL_BOOL && right->type == VAL_BOOL)
-                return create_bool_value(left->data.bool_val != right->data.bool_val);
-            if (left->type == VAL_NULL && right->type == VAL_NULL) return create_bool_value(0);
-            if (left->type == right->type)
-                return create_bool_value(left->data.int_val != right->data.int_val);
-            return create_bool_value(1);
-
-        case OP_LT:
-            if (left->type == VAL_STRING && right->type == VAL_STRING) {
-                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) < 0);
-            }
-            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
-                return create_bool_value(left->data.bool_val < right->data.bool_val);
-            }
-            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_bool_value(l < r);
-            }
-            type_errorf("Type error: '<' requires numbers, bools, or strings of same type");
-
-        case OP_LE:
-            if (left->type == VAL_STRING && right->type == VAL_STRING) {
-                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) <= 0);
-            }
-            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
-                return create_bool_value(left->data.bool_val <= right->data.bool_val);
-            }
-            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_bool_value(l <= r);
-            }
-            type_errorf("Type error: '<=' requires numbers, bools, or strings of same type");
-
-        case OP_GT:
-            if (left->type == VAL_STRING && right->type == VAL_STRING) {
-                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) > 0);
-            }
-            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
-                return create_bool_value(left->data.bool_val > right->data.bool_val);
-            }
-            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_bool_value(l > r);
-            }
-            type_errorf("Type error: '>' requires numbers, bools, or strings of same type");
-
-        case OP_GE:
-            if (left->type == VAL_STRING && right->type == VAL_STRING) {
-                return create_bool_value(strcmp(left->data.string_val, right->data.string_val) >= 0);
-            }
-            if (left->type == VAL_BOOL && right->type == VAL_BOOL) {
-                return create_bool_value(left->data.bool_val >= right->data.bool_val);
-            }
-            if (TC_IS_NUMERIC(*left) && TC_IS_NUMERIC(*right)) {
-                double l = left->type == VAL_FLOAT ? left->data.float_val : left->data.int_val;
-                double r = right->type == VAL_FLOAT ? right->data.float_val : right->data.int_val;
-                return create_bool_value(l >= r);
-            }
-            type_errorf("Type error: '>=' requires numbers, bools, or strings of same type");
-
-        case OP_AND:
-            return create_bool_value(is_truthy(left) && is_truthy(right));
-
-        case OP_OR:
-            return create_bool_value(is_truthy(left) || is_truthy(right));
-
-        case OP_IN:
-            return create_bool_value(value_in(left, right));
-
-        case OP_NOT_IN:
-            return create_bool_value(!value_in(left, right));
-
-        default:
-            fprintf(stderr, "Unknown binary operator\n");
-            exit(1);
+static Value call_method_internal(Value instance_val, const char *method_name, Value *args, int arg_count) {
+    if (instance_val.type != TYPE_INSTANCE) {
+        runtime_error("Method call requires an instance");
     }
-}
 
-static Value *eval_expression(ASTNode *node) {
-    if (node) set_error_ctx(node->line, node->file);
-    switch (node->type) {
-        case NODE_INT_LITERAL:
-            return create_int_value(node->data.int_literal.value);
+    Instance *inst = (Instance*)instance_val.data;
+    ClassValue *cls = (ClassValue*)inst->cls;
 
-        case NODE_FLOAT_LITERAL:
-            return create_float_value(node->data.float_literal.value);
+    // Find method in class
+    ASTNodeList *method = cls->methods;
+    while (method) {
+        if (method->node->type == NODE_FUNC_DEF) {
+            if (strcmp(method->node->data.func_def.name, method_name) == 0) {
+                // Found the method
+                Function func;
+                func.name = method->node->data.func_def.name;
+                func.params = method->node->data.func_def.params;
+                func.body = method->node->data.func_def.body;
+                func.env = cls->env;
 
-        case NODE_STRING_LITERAL:
-            return create_string_value(node->data.string_literal.value);
+                // Push 'this' context
+                this_stack[this_stack_top++] = inst;
 
-        case NODE_BOOL_LITERAL:
-            return create_bool_value(node->data.bool_literal.value);
+                // Create method environment with 'this'
+                Environment *method_env = create_environment(func.env);
+                env_define(method_env, "this", instance_val);
 
-        case NODE_NULL_LITERAL:
-            return create_null_value();
-
-        case NODE_IDENTIFIER:
-            return env_get(current_env, node->data.identifier.name);
-
-        case NODE_MEMBER_ACCESS: {
-            Value *obj = eval_expression(node->data.member_access.object);
-            if (obj->type != VAL_INSTANCE) {
-                fprintf(stderr, "Member access only valid on class instances\n");
-                exit(1);
-            }
-            return get_member(obj->data.instance_val, node->data.member_access.member);
-        }
-
-        case NODE_BINARY_OP: {
-            Value *left = eval_expression(node->data.binary_op.left);
-            Value *right = eval_expression(node->data.binary_op.right);
-            return eval_binary_op(left, node->data.binary_op.op, right);
-        }
-
-        case NODE_UNARY_OP: {
-            Value *operand = eval_expression(node->data.unary_op.operand);
-            if (node->data.unary_op.op == OP_NEG) {
-                if (operand->type == VAL_INT) return create_int_value(-operand->data.int_val);
-                if (operand->type == VAL_FLOAT) return create_float_value(-operand->data.float_val);
-            } else if (node->data.unary_op.op == OP_NOT) {
-                return create_bool_value(!is_truthy(operand));
-            }
-            return operand;
-        }
-
-        case NODE_ARRAY_LITERAL: {
-            Value *arr = create_array_value();
-            ASTNodeList *elem = node->data.array_literal.elements;
-            while (elem != NULL) {
-                array_append(arr->data.array_val, eval_expression(elem->node));
-                elem = elem->next;
-            }
-            return arr;
-        }
-
-        case NODE_DICT_LITERAL: {
-            Value *dict = create_dict_value();
-            ASTNodeList *pair = node->data.dict_literal.pairs;
-            while (pair != NULL) {
-                ASTNode *pair_node = pair->node;
-                Value *key = eval_expression(pair_node->data.dict_pair.key);
-                Value *value = eval_expression(pair_node->data.dict_pair.value);
-                dict_set(dict->data.dict_val, key->data.string_val, value);
-                pair = pair->next;
-            }
-            return dict;
-        }
-
-        case NODE_INDEX_ACCESS: {
-            Value *obj = eval_expression(node->data.index_access.object);
-            Value *idx = eval_expression(node->data.index_access.index);
-
-            if (obj->type == VAL_ARRAY) {
-                return array_get(obj->data.array_val, idx->data.int_val);
-            } else if (obj->type == VAL_DICT) {
-                return dict_get(obj->data.dict_val, idx->data.string_val);
-            } else if (obj->type == VAL_STRING) {
-                int i = idx->data.int_val;
-                char c[2] = {obj->data.string_val[i], '\0'};
-                return create_string_value(c);
-            }
-            fprintf(stderr, "Cannot index this type\n");
-            exit(1);
-        }
-
-        case NODE_SLICE_ACCESS: {
-            Value *obj = eval_expression(node->data.slice_access.object);
-            Value *start_val = eval_expression(node->data.slice_access.start);
-            Value *end_val = eval_expression(node->data.slice_access.end);
-
-            if (start_val->type != VAL_INT || end_val->type != VAL_INT) {
-                fprintf(stderr, "Slice indices must be integers\n");
-                exit(1);
-            }
-
-            int start = start_val->data.int_val;
-            int end = end_val->data.int_val;
-
-            if (obj->type == VAL_ARRAY) {
-                Array *arr = obj->data.array_val;
-                if (start < 0) start = 0;
-                if (end > arr->size) end = arr->size;
-                if (start > end) start = end;
-
-                Value *result = create_array_value();
-                for (int i = start; i < end; i++) {
-                    array_append(result->data.array_val, arr->elements[i]);
-                }
-                return result;
-            } else if (obj->type == VAL_STRING) {
-                char *str = obj->data.string_val;
-                int len = strlen(str);
-                if (start < 0) start = 0;
-                if (end > len) end = len;
-                if (start > end) start = end;
-
-                int slice_len = end - start;
-                char *result_str = malloc(slice_len + 1);
-                strncpy(result_str, str + start, slice_len);
-                result_str[slice_len] = '\0';
-                return create_string_value(result_str);
-            }
-            fprintf(stderr, "Cannot slice this type\n");
-            exit(1);
-        }
-
-        case NODE_FUNC_CALL: {
-            Value *func = env_get(current_env, node->data.func_call.name);
-
-            // Evaluate arguments
-            int arg_count = 0;
-            ASTNodeList *arg_node = node->data.func_call.arguments;
-            while (arg_node != NULL) {
-                arg_count++;
-                arg_node = arg_node->next;
-            }
-
-            Value **args = malloc(arg_count * sizeof(Value*));
-            arg_node = node->data.func_call.arguments;
-            for (int i = 0; i < arg_count; i++) {
-                args[i] = eval_expression(arg_node->node);
-                arg_node = arg_node->next;
-            }
-
-            if (func->type == VAL_BUILTIN) {
-                Value *result = func->data.builtin_val(args, arg_count);
-                free(args);
-                return result;
-            }
-
-            if (func->type == VAL_FUNC) {
-                Function *f = func->data.func_val;
-                Environment *func_env = create_environment(f->env);
+                Environment *saved_env = current_env;
+                current_env = method_env;
 
                 // Bind parameters
-                ASTNodeList *param = f->params;
+                ASTNodeList *param = func.params;
                 for (int i = 0; i < arg_count; i++) {
-                    if (param == NULL) {
-                        fprintf(stderr, "Too many arguments\n");
-                        exit(1);
+                    if (!param) {
+                        runtime_error("Too many arguments for method '%s'", method_name);
                     }
-                    env_define(func_env, param->node->data.identifier.name, args[i]);
+                    env_define(method_env, param->node->data.identifier.name, args[i]);
                     param = param->next;
                 }
 
-                // Execute function body
-                Environment *prev_env = current_env;
-                current_env = func_env;
+                if (param) {
+                    runtime_error("Not enough arguments for method '%s'", method_name);
+                }
 
+                // Execute method
                 has_returned = 0;
-                ASTNodeList *stmt = f->body;
-                while (stmt != NULL && !has_returned) {
-                    eval_statement(stmt->node);
-                    stmt = stmt->next;
-                }
+                execute_block(func.body);
 
-                current_env = prev_env;
-                free(args);
+                Value result = has_returned ? return_value : make_null();
+                has_returned = 0;
 
-                if (has_returned) {
-                    Value *result = return_value;
-                    has_returned = 0;  // Reset flag for next call
-                    return result;
-                } else {
-                    return create_null_value();
-                }
+                current_env = saved_env;
+                this_stack_top--;
+
+                return result;
             }
-
-            fprintf(stderr, "Not a function\n");
-            exit(1);
         }
+        method = method->next;
+    }
 
-        case NODE_METHOD_CALL: {
-            // Evaluate arguments
-            int arg_count = 0;
-            ASTNodeList *arg_node = node->data.method_call.arguments;
-            while (arg_node != NULL) {
-                arg_count++;
-                arg_node = arg_node->next;
-            }
+    runtime_error("Method '%s' not found", method_name);
+}
 
-            Value **args = malloc(arg_count * sizeof(Value*));
-            arg_node = node->data.method_call.arguments;
-            for (int i = 0; i < arg_count; i++) {
-                args[i] = eval_expression(arg_node->node);
-                arg_node = arg_node->next;
-            }
+static Value eval_new_expr(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
 
-            Value *obj = eval_expression(node->data.method_call.object);
-            Value *result = call_method(obj, node->data.method_call.method, args, arg_count);
-            free(args);
-            return result;
+    char *class_name = node->data.new_expr.class_name;
+
+    // Get class from environment
+    if (!env_exists(current_env, class_name)) {
+        runtime_error("Undefined class: %s", class_name);
+    }
+
+    Value class_val = env_get(current_env, class_name);
+    if (class_val.type != TYPE_CLASS) {
+        runtime_error("'%s' is not a class", class_name);
+    }
+
+    ClassValue *cls = (ClassValue*)class_val.data;
+
+    // Create instance
+    Instance *inst = gc_alloc(TYPE_INSTANCE, sizeof(Instance));
+    inst->cls = (Class*)cls;  // Store ClassValue as Class (interpreter-specific)
+    inst->fields = make_dict();
+
+    Value instance_val = {TYPE_INSTANCE, (long)inst};
+
+    // Initialize fields from class members
+    ASTNodeList *member = cls->members;
+    while (member) {
+        if (member->node->type == NODE_VAR_DECL) {
+            char *field_name = member->node->data.var_decl.name;
+            Value field_val = member->node->data.var_decl.value ?
+                             eval_expression(member->node->data.var_decl.value) :
+                             make_null();
+
+            Value key = {TYPE_STRING, (long)field_name};
+            dict_set(inst->fields, key, field_val);
         }
+        member = member->next;
+    }
 
-        case NODE_NEW_EXPR: {
-            Value *cls_val = env_get(current_env, node->data.new_expr.class_name);
-            if (cls_val->type != VAL_CLASS) {
-                fprintf(stderr, "%s is not a class\n", node->data.new_expr.class_name);
-                exit(1);
-            }
+    // Count and evaluate constructor arguments
+    int arg_count = 0;
+    ASTNodeList *arg_node = node->data.new_expr.arguments;
+    while (arg_node) {
+        arg_count++;
+        arg_node = arg_node->next;
+    }
 
-            int arg_count = 0;
-            ASTNodeList *arg_node = node->data.new_expr.arguments;
-            while (arg_node != NULL) {
-                arg_count++;
-                arg_node = arg_node->next;
-            }
-
-            Value **args = malloc(arg_count * sizeof(Value*));
-            arg_node = node->data.new_expr.arguments;
-            for (int i = 0; i < arg_count; i++) {
-                args[i] = eval_expression(arg_node->node);
-                arg_node = arg_node->next;
-            }
-
-            Value *result = instantiate_class(cls_val->data.class_val, args, arg_count);
-            free(args);
-            return result;
+    Value *args = NULL;
+    if (arg_count > 0) {
+        args = gc_alloc(TYPE_ARRAY, arg_count * sizeof(Value));
+        arg_node = node->data.new_expr.arguments;
+        for (int i = 0; i < arg_count; i++) {
+            args[i] = eval_expression(arg_node->node);
+            arg_node = arg_node->next;
         }
+    }
+
+    // Call init method if it exists
+    ASTNodeList *method = cls->methods;
+    while (method) {
+        if (method->node->type == NODE_FUNC_DEF) {
+            if (strcmp(method->node->data.func_def.name, "init") == 0) {
+                call_method_internal(instance_val, "init", args, arg_count);
+                break;
+            }
+        }
+        method = method->next;
+    }
+
+    return instance_val;
+}
+
+static Value eval_expression(ASTNode *node) {
+    if (!node) {
+        return make_null();
+    }
+
+    switch (node->type) {
+        case NODE_INT_LITERAL:
+        case NODE_FLOAT_LITERAL:
+        case NODE_STRING_LITERAL:
+        case NODE_BOOL_LITERAL:
+        case NODE_NULL_LITERAL:
+            return eval_literal(node);
+
+        case NODE_IDENTIFIER:
+            return eval_identifier(node);
+
+        case NODE_BINARY_OP:
+            return eval_binary_op(node);
+
+        case NODE_UNARY_OP:
+            return eval_unary_op(node);
+
+        case NODE_ARRAY_LITERAL:
+            return eval_array_literal(node);
+
+        case NODE_DICT_LITERAL:
+            return eval_dict_literal(node);
+
+        case NODE_INDEX_ACCESS:
+            return eval_index_access(node);
+
+        case NODE_SLICE_ACCESS:
+            return eval_slice_access(node);
+
+        case NODE_MEMBER_ACCESS:
+            return eval_member_access(node);
+
+        case NODE_FUNC_CALL:
+            return eval_function_call(node);
+
+        case NODE_METHOD_CALL:
+            return eval_method_call(node);
+
+        case NODE_NEW_EXPR:
+            return eval_new_expr(node);
 
         default:
-            fprintf(stderr, "Unknown expression type\n");
+            runtime_error("Unknown expression node type: %d", node->type);
+    }
+}
+
+// ============================================================================
+// Statement execution
+// ============================================================================
+
+static void eval_var_decl(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    char *var_name = node->data.var_decl.name;
+    Value val = node->data.var_decl.value ?
+                eval_expression(node->data.var_decl.value) :
+                make_null();
+
+    env_define(current_env, var_name, val);
+}
+
+static void eval_assignment(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    ASTNode *target = node->data.assignment.target;
+    Value val = eval_expression(node->data.assignment.value);
+
+    if (target->type == NODE_IDENTIFIER) {
+        // Simple variable assignment
+        env_set(current_env, target->data.identifier.name, val);
+    }
+    else if (target->type == NODE_INDEX_ACCESS) {
+        // Array/dict element assignment
+        Value obj = eval_expression(target->data.index_access.object);
+        Value index = eval_expression(target->data.index_access.index);
+        index_set(obj, index, val);
+    }
+    else if (target->type == NODE_MEMBER_ACCESS) {
+        // Instance field assignment
+        Value obj = eval_expression(target->data.member_access.object);
+        if (obj.type != TYPE_INSTANCE) {
+            runtime_error("Member assignment requires an instance");
+        }
+        Instance *inst = (Instance*)obj.data;
+        Value field_name = {TYPE_STRING, (long)target->data.member_access.member};
+        index_set(inst->fields, field_name, val);
+    }
+    else {
+        runtime_error("Invalid assignment target");
+    }
+}
+
+static void eval_if_stmt(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Value cond = eval_expression(node->data.if_stmt.condition);
+
+    if (is_truthy(cond)) {
+        // Create new scope for then block
+        Environment *then_env = create_environment(current_env);
+        Environment *saved_env = current_env;
+        current_env = then_env;
+        execute_block(node->data.if_stmt.then_block);
+        current_env = saved_env;
+    } else if (node->data.if_stmt.else_block) {
+        // Create new scope for else block
+        Environment *else_env = create_environment(current_env);
+        Environment *saved_env = current_env;
+        current_env = else_env;
+        execute_block(node->data.if_stmt.else_block);
+        current_env = saved_env;
+    }
+}
+
+static void eval_while_stmt(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    loop_env_stack[loop_env_top++] = current_env;
+
+    if (setjmp(break_jmp) == 0) {
+        while (1) {
+            Value cond = eval_expression(node->data.while_stmt.condition);
+            if (!is_truthy(cond)) break;
+
+            // Create new scope for each iteration
+            Environment *iter_env = create_environment(current_env);
+            Environment *saved_env = current_env;
+            current_env = iter_env;
+
+            if (setjmp(continue_jmp) == 0) {
+                execute_block(node->data.while_stmt.body);
+            }
+
+            current_env = saved_env;
+        }
+    }
+
+    loop_env_top--;
+}
+
+static void eval_for_stmt(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    char *var_name = node->data.for_stmt.index_var;
+    Value start = eval_expression(node->data.for_stmt.start);
+    Value end = eval_expression(node->data.for_stmt.end);
+
+    if (start.type != TYPE_INT || end.type != TYPE_INT) {
+        runtime_error("For loop range must be integers");
+    }
+
+    long start_val = start.data;
+    long end_val = end.data;
+
+    // Create loop scope
+    Environment *loop_env = create_environment(current_env);
+    Environment *saved_env = current_env;
+    current_env = loop_env;
+    loop_env_stack[loop_env_top++] = loop_env;
+
+    // Define the loop variable once
+    env_define(loop_env, var_name, (Value){TYPE_INT, start_val});
+
+    if (setjmp(break_jmp) == 0) {
+        if (start_val <= end_val) {
+            for (long i = start_val; i <= end_val; i++) {
+                env_set(loop_env, var_name, (Value){TYPE_INT, i});
+
+                if (setjmp(continue_jmp) == 0) {
+                    execute_block(node->data.for_stmt.body);
+                }
+            }
+        } else {
+            for (long i = start_val; i >= end_val; i--) {
+                env_set(loop_env, var_name, (Value){TYPE_INT, i});
+
+                if (setjmp(continue_jmp) == 0) {
+                    execute_block(node->data.for_stmt.body);
+                }
+            }
+        }
+    }
+
+    loop_env_top--;
+    current_env = saved_env;
+}
+
+static void eval_foreach_stmt(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    char *key_var = node->data.foreach_stmt.key_var;
+    char *value_var = node->data.foreach_stmt.value_var;
+    Value collection = eval_expression(node->data.foreach_stmt.collection);
+
+    // Create loop scope
+    Environment *loop_env = create_environment(current_env);
+    Environment *saved_env = current_env;
+    current_env = loop_env;
+    loop_env_stack[loop_env_top++] = loop_env;
+
+    // Define loop variables once
+    env_define(loop_env, key_var, make_null());
+    env_define(loop_env, value_var, make_null());
+
+    if (collection.type == TYPE_ARRAY) {
+        Array *arr = (Array*)collection.data;
+        Value *elements = (Value*)arr->data;
+
+        if (setjmp(break_jmp) == 0) {
+            for (int i = 0; i < arr->size; i++) {
+                env_set(loop_env, key_var, (Value){TYPE_INT, i});
+                env_set(loop_env, value_var, elements[i]);
+
+                if (setjmp(continue_jmp) == 0) {
+                    execute_block(node->data.foreach_stmt.body);
+                }
+            }
+        }
+    } else if (collection.type == TYPE_DICT) {
+        Dict *dict = (Dict*)collection.data;
+
+        if (setjmp(break_jmp) == 0) {
+            for (int i = 0; i < HASH_SIZE; i++) {
+                DictEntry *entry = dict->buckets[i];
+                while (entry) {
+                    Value key_val = {TYPE_STRING, (long)entry->key};
+                    env_set(loop_env, key_var, key_val);
+                    env_set(loop_env, value_var, entry->value);
+
+                    if (setjmp(continue_jmp) == 0) {
+                        execute_block(node->data.foreach_stmt.body);
+                    }
+
+                    entry = entry->next;
+                }
+            }
+        }
+    } else {
+        runtime_error("foreach requires an array or dict");
+    }
+
+    loop_env_top--;
+    current_env = saved_env;
+}
+
+static void eval_break(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+    longjmp(break_jmp, 1);
+}
+
+static void eval_continue(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+    longjmp(continue_jmp, 1);
+}
+
+static void eval_return(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    return_value = node->data.return_stmt.value ?
+                   eval_expression(node->data.return_stmt.value) :
+                   make_null();
+    has_returned = 1;
+}
+
+static void eval_func_def(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Function *func = malloc(sizeof(Function));
+    func->name = node->data.func_def.name;
+    func->params = node->data.func_def.params;
+    func->body = node->data.func_def.body;
+    func->env = current_env;
+
+    Value func_val = {TYPE_FUNC, (long)func};
+    env_define(current_env, func->name, func_val);
+}
+
+static void eval_class_def(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    ClassValue *cls = malloc(sizeof(ClassValue));
+    cls->name = node->data.class_def.name;
+    cls->members = node->data.class_def.members;
+    cls->methods = node->data.class_def.methods;
+    cls->env = current_env;
+
+    Value class_val = {TYPE_CLASS, (long)cls};
+    env_define(current_env, cls->name, class_val);
+}
+
+static void eval_try_catch(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    if (setjmp(exception_stack[exception_top++]) == 0) {
+        // Try block - create new scope
+        Environment *try_env = create_environment(current_env);
+        Environment *saved_env = current_env;
+        current_env = try_env;
+        execute_block(node->data.try_catch.try_block);
+        current_env = saved_env;
+        exception_top--;
+    } else {
+        // Catch block - create new scope
+        exception_top--;
+        Environment *catch_env = create_environment(current_env);
+        Environment *saved_env = current_env;
+        current_env = catch_env;
+
+        // Bind exception to variable
+        if (node->data.try_catch.catch_var) {
+            env_define(catch_env, node->data.try_catch.catch_var, exception_value);
+        }
+
+        execute_block(node->data.try_catch.catch_block);
+        current_env = saved_env;
+    }
+}
+
+static void eval_raise(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    exception_value = eval_expression(node->data.raise_stmt.expr);
+
+    if (exception_top > 0) {
+        longjmp(exception_stack[exception_top - 1], 1);
+    } else {
+        // Unhandled exception
+        printf("Uncaught exception: ");
+        print_value(exception_value);
+        printf("\n");
+        exit(1);
+    }
+}
+
+static void eval_assert(ASTNode *node) {
+    set_error_ctx(node->line, node->file);
+
+    Value cond = eval_expression(node->data.assert_stmt.expr);
+    if (!is_truthy(cond)) {
+        Value msg;
+        if (node->data.assert_stmt.msg) {
+            msg = eval_expression(node->data.assert_stmt.msg);
+        } else {
+            char buf[256];
+            snprintf(buf, sizeof(buf), "Assertion failed");
+            char *msg_str = gc_alloc(TYPE_STRING, strlen(buf) + 1);
+            strcpy(msg_str, buf);
+            msg = (Value){TYPE_STRING, (long)msg_str};
+        }
+
+        // Raise exception instead of exiting
+        exception_value = msg;
+        if (exception_top > 0) {
+            longjmp(exception_stack[exception_top - 1], 1);
+        } else {
+            // Unhandled exception
+            printf("Assertion failed: ");
+            print_value(msg);
+            printf("\n");
             exit(1);
+        }
     }
 }
 
 static void eval_statement(ASTNode *node) {
-    if (node) set_error_ctx(node->line, node->file);
+    if (!node) return;
+
+    // Check for return
+    if (has_returned) return;
+
     switch (node->type) {
-        case NODE_VAR_DECL: {
-            if (env_exists_current(current_env, node->data.var_decl.name)) {
-                type_errorf("Redefinition of '%s' in the same scope", node->data.var_decl.name);
-            }
-            Value *val = eval_expression(node->data.var_decl.value);
-            env_define(current_env, node->data.var_decl.name, val);
+        case NODE_VAR_DECL:
+            eval_var_decl(node);
             break;
-        }
 
-        case NODE_ASSIGNMENT: {
-            Value *val = eval_expression(node->data.assignment.value);
-            ASTNode *target = node->data.assignment.target;
-
-            if (target->type == NODE_IDENTIFIER) {
-                env_set(current_env, target->data.identifier.name, val);
-            } else if (target->type == NODE_INDEX_ACCESS) {
-                Value *obj = eval_expression(target->data.index_access.object);
-                Value *idx = eval_expression(target->data.index_access.index);
-
-                if (obj->type == VAL_ARRAY) {
-                    array_set(obj->data.array_val, idx->data.int_val, val);
-                } else if (obj->type == VAL_DICT) {
-                    dict_set(obj->data.dict_val, idx->data.string_val, val);
-                }
-            } else if (target->type == NODE_MEMBER_ACCESS) {
-                Value *obj = eval_expression(target->data.member_access.object);
-                if (obj->type != VAL_INSTANCE) {
-                    fprintf(stderr, "Member assignment only valid on class instances\n");
-                    exit(1);
-                }
-                set_member(obj->data.instance_val, target->data.member_access.member, val);
-            }
+        case NODE_ASSIGNMENT:
+            eval_assignment(node);
             break;
-        }
 
-        case NODE_FUNC_DEF: { // 这是函数定义, 不是函数调用. 函数调用在 eval_expression NODE_FUNC_CALL
-            Value *func = create_func_value(
-                node->data.func_def.name,
-                node->data.func_def.params,
-                node->data.func_def.body,
-                current_env
-            );
-            env_define(current_env, node->data.func_def.name, func);
+        case NODE_IF_STMT:
+            eval_if_stmt(node);
             break;
-        }
 
-        case NODE_CLASS_DEF: {
-            Value *cls = create_class_value(
-                node->data.class_def.name,
-                node->data.class_def.members,
-                node->data.class_def.methods,
-                current_env
-            );
-            env_define(current_env, node->data.class_def.name, cls);
+        case NODE_WHILE_STMT:
+            eval_while_stmt(node);
             break;
-        }
 
-        case NODE_RETURN: {
-            return_value = node->data.return_stmt.value ?
-                eval_expression(node->data.return_stmt.value) :
-                create_null_value();
-            has_returned = 1;
+        case NODE_FOR_STMT:
+            eval_for_stmt(node);
             break;
-        }
 
-        case NODE_TRY_CATCH: {
-            if (exception_top >= 256) {
-                fprintf(stderr, "Exception stack overflow\n");
-                exit(1);
-            }
-            Environment *prev_env = current_env;
-            volatile int saved_idx = exception_top++;
-            int jmp_res = setjmp(exception_stack[saved_idx]);
-            if (jmp_res == 0) {
-                ASTNodeList *stmt = node->data.try_catch.try_block;
-                while (stmt != NULL && !has_returned) {
-                    eval_statement(stmt->node);
-                    stmt = stmt->next;
-                }
-                exception_top = saved_idx;
-            } else {
-                exception_top = saved_idx;
-                Environment *catch_env = prev_env;
-                // Prepend catch location
-                char buf[512];
-                const char *cfile = node->file ? node->file : "<input>";
-                snprintf(buf, sizeof(buf), "[caught in %s:%d] ", cfile, node->line);
-                if (exception_value && exception_value->type == VAL_STRING) {
-                    char *combined = malloc(strlen(buf) + strlen(exception_value->data.string_val) + 1);
-                    strcpy(combined, buf);
-                    strcat(combined, exception_value->data.string_val);
-                    env_set_or_define(catch_env, node->data.try_catch.catch_var, create_string_value(combined));
-                    free(combined);
-                } else {
-                    env_set_or_define(catch_env, node->data.try_catch.catch_var,
-                                      exception_value ? exception_value : create_null_value());
-                }
-                current_env = catch_env;
-                exception_value = NULL;
-                ASTNodeList *stmt = node->data.try_catch.catch_block;
-                while (stmt != NULL && !has_returned) {
-                    eval_statement(stmt->node);
-                    stmt = stmt->next;
-                }
-                current_env = prev_env;
-            }
+        case NODE_FOREACH_STMT:
+            eval_foreach_stmt(node);
             break;
-        }
-
-        case NODE_RAISE: {
-            Value *m = eval_expression(node->data.raise_stmt.expr);
-            raise_exception(m, node->file, node->line);
-            break;
-        }
-
-        case NODE_ASSERT: {
-            Value *cond = eval_expression(node->data.assert_stmt.expr);
-            if (!is_truthy(cond)) {
-                Value *msg = node->data.assert_stmt.msg ?
-                    eval_expression(node->data.assert_stmt.msg) :
-                    create_string_value("Assertion failed");
-                raise_exception(msg, node->file, node->line);
-            }
-            break;
-        }
-
-        case NODE_IF_STMT: {
-            Value *cond = eval_expression(node->data.if_stmt.condition);
-            if (is_truthy(cond)) {
-                execute_block(node->data.if_stmt.then_block);
-            } else if (node->data.if_stmt.else_block) {
-                execute_block(node->data.if_stmt.else_block);
-            }
-            break;
-        }
-
-        case NODE_WHILE_STMT: {
-            Environment *loop_base = current_env;
-            loop_env_stack[loop_env_top++] = loop_base;
-            if (setjmp(break_jmp) == 0) {
-                while (1) {
-                    if (has_returned) break;
-
-                    current_env = loop_base;
-                    Value *cond = eval_expression(node->data.while_stmt.condition);
-                    if (!is_truthy(cond)) break;
-
-                    if (setjmp(continue_jmp) == 0) {
-                        Environment *iter_env = create_environment(loop_base);
-                        Environment *prev_env = current_env;
-                        current_env = iter_env;
-                        ASTNodeList *stmt = node->data.while_stmt.body;
-                        while (stmt != NULL && !has_returned) {
-                            eval_statement(stmt->node);
-                            stmt = stmt->next;
-                        }
-                        current_env = prev_env;
-                    }
-                }
-            }
-            loop_env_top--;
-            current_env = loop_base;
-            break;
-        }
-
-        case NODE_FOR_STMT: {
-            Value *start_v = eval_expression(node->data.for_stmt.start);
-            Value *end_v = eval_expression(node->data.for_stmt.end);
-            long start = (long)value_to_double_interp(start_v);
-            long end = (long)value_to_double_interp(end_v);
-            long step = (start <= end) ? 1 : -1;
-
-            Environment *loop_base = current_env;
-            loop_env_stack[loop_env_top++] = loop_base;
-            if (setjmp(break_jmp) == 0) {
-                long cur = start;
-                while (1) {
-                    if (has_returned) break;
-                    int cont = (step > 0) ? (cur <= end) : (cur >= end);
-                    if (!cont) break;
-
-                    if (setjmp(continue_jmp) == 0) {
-                        Environment *iter_env = create_environment(loop_base);
-                        env_define(iter_env, node->data.for_stmt.index_var, create_int_value((int)cur));
-                        Environment *prev_env = current_env;
-                        current_env = iter_env;
-                        ASTNodeList *stmt = node->data.for_stmt.body;
-                        while (stmt != NULL && !has_returned) {
-                            eval_statement(stmt->node);
-                            stmt = stmt->next;
-                        }
-                        current_env = prev_env;
-                    }
-                    cur += step;
-                }
-            }
-            loop_env_top--;
-            current_env = loop_base;
-            break;
-        }
-
-        case NODE_FOREACH_STMT: {
-            Value *collection = eval_expression(node->data.foreach_stmt.collection);
-            Environment *loop_base = current_env;
-            loop_env_stack[loop_env_top++] = loop_base;
-
-            if (setjmp(break_jmp) == 0) {
-                if (collection->type == VAL_ARRAY) {
-                    Array *arr = collection->data.array_val;
-                    for (int i = 0; i < arr->size && !has_returned; i++) {
-                        if (setjmp(continue_jmp) == 0) {
-                            Environment *iter_env = create_environment(loop_base);
-                            Environment *prev_env = current_env;
-                            current_env = iter_env;
-                            env_define(current_env, node->data.foreach_stmt.key_var, create_int_value(i));
-                            env_define(current_env, node->data.foreach_stmt.value_var, arr->elements[i]);
-                            ASTNodeList *stmt = node->data.foreach_stmt.body;
-                            while (stmt != NULL && !has_returned) {
-                                eval_statement(stmt->node);
-                                stmt = stmt->next;
-                            }
-                            current_env = prev_env;
-                        }
-                    }
-                } else if (collection->type == VAL_DICT) {
-                    Dict *dict = collection->data.dict_val;
-                    int count;
-                    char **keys = dict_keys(dict, &count);
-
-                    for (int i = 0; i < count && !has_returned; i++) {
-                        if (setjmp(continue_jmp) == 0) {
-                            Environment *iter_env = create_environment(loop_base);
-                            Environment *prev_env = current_env;
-                            current_env = iter_env;
-                            env_define(current_env, node->data.foreach_stmt.key_var, create_string_value(keys[i]));
-                            env_define(current_env, node->data.foreach_stmt.value_var, dict_get(dict, keys[i]));
-                            ASTNodeList *stmt = node->data.foreach_stmt.body;
-                            while (stmt != NULL && !has_returned) {
-                                eval_statement(stmt->node);
-                                stmt = stmt->next;
-                            }
-                            current_env = prev_env;
-                        }
-                    }
-
-                    free(keys);
-                } else {
-                    fprintf(stderr, "Can only iterate over arrays and dicts\n");
-                    exit(1);
-                }
-            }
-            loop_env_top--;
-            current_env = loop_base;
-            break;
-        }
 
         case NODE_BREAK:
-            if (loop_env_top > 0) current_env = loop_env_stack[loop_env_top - 1];
-            longjmp(break_jmp, 1);
+            eval_break(node);
             break;
 
         case NODE_CONTINUE:
-            if (loop_env_top > 0) current_env = loop_env_stack[loop_env_top - 1];
-            longjmp(continue_jmp, 1);
+            eval_continue(node);
             break;
 
+        case NODE_RETURN:
+            eval_return(node);
+            break;
+
+        case NODE_FUNC_DEF:
+            eval_func_def(node);
+            break;
+
+        case NODE_CLASS_DEF:
+            eval_class_def(node);
+            break;
+
+        case NODE_TRY_CATCH:
+            eval_try_catch(node);
+            break;
+
+        case NODE_RAISE:
+            eval_raise(node);
+            break;
+
+        case NODE_ASSERT:
+            eval_assert(node);
+            break;
+
+        // Expression statements (allow any expression as a statement)
         case NODE_FUNC_CALL:
+        case NODE_METHOD_CALL:
+        case NODE_BINARY_OP:
+        case NODE_UNARY_OP:
+        case NODE_ARRAY_LITERAL:
+        case NODE_DICT_LITERAL:
+        case NODE_INDEX_ACCESS:
+        case NODE_SLICE_ACCESS:
+        case NODE_MEMBER_ACCESS:
+        case NODE_NEW_EXPR:
+        case NODE_IDENTIFIER:
+        case NODE_INT_LITERAL:
+        case NODE_FLOAT_LITERAL:
+        case NODE_STRING_LITERAL:
+        case NODE_BOOL_LITERAL:
+        case NODE_NULL_LITERAL:
+            // Any expression can be a statement (result is discarded)
             eval_expression(node);
             break;
 
         default:
-            eval_expression(node);
-            break;
+            runtime_error("Unknown statement type: %d", node->type);
     }
 }
 
-void set_cmd_args(int argc, char **argv) {
-    g_argc = argc;
-    g_argv = argv;
+static void execute_block(ASTNodeList *stmts) {
+    while (stmts && !has_returned) {
+        eval_statement(stmts->node);
+        stmts = stmts->next;
+    }
 }
 
+// ============================================================================
+// Main interpreter entry point
+// ============================================================================
+
 void interpret(ASTNode *root) {
+    if (!root || root->type != NODE_PROGRAM) {
+        fprintf(stderr, "Error: Invalid program node\n");
+        return;
+    }
+
+    // Create global environment
     global_env = create_environment(NULL);
     current_env = global_env;
 
-    setup_builtins();
-
-    if (root->type == NODE_PROGRAM) {
-        ASTNodeList *stmt = root->data.program.statements;
-        while (stmt != NULL) {
-            eval_statement(stmt->node);
-            stmt = stmt->next;
-        }
+    // Execute program statements
+    ASTNodeList *stmt = root->data.program.statements;
+    while (stmt) {
+        eval_statement(stmt->node);
+        stmt = stmt->next;
     }
 }
