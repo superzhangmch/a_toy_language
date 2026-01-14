@@ -749,6 +749,8 @@ static void emit_runtime_decls(LLVMCodeGen *gen) {
         "declare i32 @setjmp(i8*)\n"
         "declare %%Value @remove_entry(%%Value, %%Value)\n"
         "declare %%Value @cmd_args()\n"
+        "declare %%Value @gc_stat()\n"
+        "declare %%Value @gc_run()\n"
         "declare %%Value @make_class(i8*)\n"
         "declare void @class_add_field(%%Value, i8*, %%Value (%%Value)*, i32)\n"
         "declare void @class_add_method(%%Value, i8*, %%Value (%%Value, %%Value*, i32)*, i32, i32)\n"

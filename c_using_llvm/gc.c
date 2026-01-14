@@ -17,6 +17,9 @@ void gc_init(void) {
     gc.stack_bottom = NULL;
     gc.heap_start = (void*)~(size_t)0;  // Max address
     gc.heap_end = NULL;                  // Min address
+    gc.total_collections = 0;
+    gc.total_objects_freed = 0;
+    gc.total_bytes_freed = 0;
 
     printf("GC: Initialized (threshold: %d objects)\n", gc.max_objects);
 }
@@ -235,6 +238,13 @@ void gc_collect(void) {
     int after = gc.num_objects;
     size_t after_size = gc.heap_size;
 
+    // Update cumulative statistics
+    int freed_objects = before - after;
+    size_t freed_bytes = before_size - after_size;
+    gc.total_collections++;
+    gc.total_objects_freed += freed_objects;
+    gc.total_bytes_freed += freed_bytes;
+
     // Adjust threshold based on collection results
     if (after > 0) {
         gc.max_objects = after * 2;
@@ -243,7 +253,7 @@ void gc_collect(void) {
     }
 
     printf("GC: Collected %d objects (%zu bytes), %d objects (%zu bytes) remain, next threshold: %d\n",
-           before - after, before_size - after_size,
+           freed_objects, freed_bytes,
            after, after_size, gc.max_objects);
 }
 
@@ -324,8 +334,12 @@ void gc_mark_value(Value *v) {
 // Print GC statistics
 void gc_print_stats(void) {
     printf("\n=== GC Statistics ===\n");
-    printf("Objects: %d (threshold: %d)\n", gc.num_objects, gc.max_objects);
-    printf("Heap size: %zu bytes (max: %zu)\n", gc.heap_size, gc.max_heap_size);
+    printf("Current objects: %d (threshold: %d)\n", gc.num_objects, gc.max_objects);
+    printf("Current heap size: %zu bytes (max: %zu)\n", gc.heap_size, gc.max_heap_size);
     printf("Root stack: %d / %d\n", gc.root_count, MAX_ROOTS);
+    printf("\n");
+    printf("Total collections: %d\n", gc.total_collections);
+    printf("Total objects freed: %d\n", gc.total_objects_freed);
+    printf("Total bytes freed: %zu\n", gc.total_bytes_freed);
     printf("====================\n\n");
 }

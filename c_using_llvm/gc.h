@@ -31,6 +31,11 @@ typedef struct {
     // Heap address range for fast filtering
     void *heap_start;           // Lowest heap address seen
     void *heap_end;             // Highest heap address seen
+
+    // Cumulative statistics
+    int total_collections;      // Total number of GC runs
+    int total_objects_freed;    // Total objects freed across all collections
+    size_t total_bytes_freed;   // Total bytes freed across all collections
 } GC;
 
 // Global GC instance

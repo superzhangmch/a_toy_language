@@ -44,3 +44,6 @@ while (c > 0) {
     e = d % a
     c = c - 14
 }
+gc_stat()
+gc_run()
+gc_stat()

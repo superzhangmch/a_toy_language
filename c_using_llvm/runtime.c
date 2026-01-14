@@ -2166,3 +2166,17 @@ Value cmd_args(void) {
     Value result = {TYPE_ARRAY, (long)arr};
     return result;
 }
+
+// GC statistics function - callable from TL scripts
+Value gc_stat(void) {
+    gc_print_stats();
+    Value result = {TYPE_NULL, 0};
+    return result;
+}
+
+// Force garbage collection - callable from TL scripts
+Value gc_run(void) {
+    gc_collect();
+    Value result = {TYPE_NULL, 0};
+    return result;
+}

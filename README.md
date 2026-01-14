@@ -153,8 +153,6 @@ include_once $code_file
 - `append(arr, val)` - 添加到数组
 - `remove(dict_or_list, dict_key_or_list_idx)` - return true if dict_key_or_list_idx exists, or else return false
 
-- `input()` - 读取用户输入
-
 类型:
 - `str(x)` - 转换为字符串
 - `int(x)` - 转换为整数
@@ -190,8 +188,11 @@ json:
 - `pow(num1, num2)`
 - `random([arg1, arg2])`
 
-命令行参数:
+系统级:
+- `input()` - 读取用户输入
 - `cmd_args()` - 获得命令行参数
+- `gc_run()` - 垃圾回收
+- `gc_stat()` - 垃圾回收信息统计
 
 note: llvm 模式, 复杂函数是怎么编译成 binary 的? c 语言实现并编译成 bin, 然后 llvm 直接调用 c 实现
 

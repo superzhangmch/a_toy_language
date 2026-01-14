@@ -104,3 +104,4 @@ while (idx < 30 and idx < len(word_list)) {
 
 println("")
 println("Done!")
+gc_stat()

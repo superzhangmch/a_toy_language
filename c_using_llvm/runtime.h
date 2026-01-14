@@ -168,4 +168,8 @@ Value method_call(Value instance, char *name, Value *args, int arg_count);
 void set_cmd_args(int argc, char **argv);
 Value cmd_args(void);
 
+// GC statistics and control
+Value gc_stat(void);
+Value gc_run(void);
+
 #endif
