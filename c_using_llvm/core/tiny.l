@@ -48,7 +48,7 @@ extern int yylineno;
 
 [a-zA-Z_][a-zA-Z0-9_]*  { yylval.sval = strdup(yytext); return IDENTIFIER; }
 
-[0-9]+\.[0-9]+          { yylval.fval = atof(yytext); return FLOAT; }
+[0-9]+\.[0-9]*          { yylval.fval = atof(yytext); return FLOAT; }
 [0-9]+                  { yylval.ival = atoi(yytext); return INTEGER; }
 
 \"([^"\\]|\\.|\\n)*\"       {

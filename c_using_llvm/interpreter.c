@@ -1379,3 +1379,34 @@ void interpret(ASTNode *root) {
         stmt = stmt->next;
     }
 }
+
+// Initialize interpreter for interactive mode (call once at startup)
+void interpret_init(void) {
+    global_env = create_environment(NULL);
+    current_env = global_env;
+}
+
+// Execute statements in interactive mode (preserves global environment)
+void interpret_interactive(ASTNode *root) {
+    if (!root) {
+        return;
+    }
+
+    // Initialize environment if not already done
+    if (!global_env) {
+        interpret_init();
+    }
+
+    // Execute based on node type
+    if (root->type == NODE_PROGRAM) {
+        // Execute all statements in the program
+        ASTNodeList *stmt = root->data.program.statements;
+        while (stmt) {
+            eval_statement(stmt->node);
+            stmt = stmt->next;
+        }
+    } else {
+        // Execute single statement
+        eval_statement(root);
+    }
+}

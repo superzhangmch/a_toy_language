@@ -54,5 +54,7 @@ int env_exists(Environment *env, char *name);
 // ============================================================================
 
 void interpret(ASTNode *root);
+void interpret_init(void);
+void interpret_interactive(ASTNode *root);
 
 #endif /* INTERPRETER_H */

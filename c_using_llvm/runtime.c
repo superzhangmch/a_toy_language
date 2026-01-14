@@ -857,12 +857,20 @@ Value binary_op(Value left, int op, Value right, int line, const char *file) {
         case 3: { // DIV
             REQUIRE_NUMERIC("division");
             if (left.type == TYPE_INT && right.type == TYPE_INT) {
+                if (right.data == 0) {
+                    Value msg = {TYPE_STRING, (long)"Division by zero"};
+                    __raise(msg, TC_CTX_LINE, (char*)TC_CTX_FILE);
+                }
                 long quot = left.data / right.data;
                 Value result = {TYPE_INT, quot};
                 return result;
             } else {
                 double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
                 double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                if (r == 0.0) {
+                    Value msg = {TYPE_STRING, (long)"Division by zero"};
+                    __raise(msg, TC_CTX_LINE, (char*)TC_CTX_FILE);
+                }
                 double quot = l / r;
                 Value result = {TYPE_FLOAT, *(long*)&quot};
                 return result;
@@ -874,9 +882,17 @@ Value binary_op(Value left, int op, Value right, int line, const char *file) {
             if (left.type == TYPE_FLOAT || right.type == TYPE_FLOAT) {
                 double l = (left.type == TYPE_FLOAT) ? *(double*)&left.data : (double)left.data;
                 double r = (right.type == TYPE_FLOAT) ? *(double*)&right.data : (double)right.data;
+                if (r == 0.0) {
+                    Value msg = {TYPE_STRING, (long)"Modulo by zero"};
+                    __raise(msg, TC_CTX_LINE, (char*)TC_CTX_FILE);
+                }
                 double rem = fmod(l, r);
                 Value result = {TYPE_FLOAT, *(long*)&rem};
                 return result;
+            }
+            if (right.data == 0) {
+                Value msg = {TYPE_STRING, (long)"Modulo by zero"};
+                __raise(msg, TC_CTX_LINE, (char*)TC_CTX_FILE);
             }
             long rem = left.data % right.data;
             Value result = {TYPE_INT, rem};
