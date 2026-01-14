@@ -830,7 +830,9 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "declare i8* @strcpy(i8*, i8*)\n"
         "declare i8* @strcat(i8*, i8*)\n"
         "declare void @print_value(%%Value)\n"
-        "declare void @set_cmd_args(i32, i8**)\n\n"
+        "declare void @set_cmd_args(i32, i8**)\n"
+        "declare void @gc_init()\n"
+        "declare void @gc_set_stack_bottom(i8*)\n\n"
 
         "@.str_newline = private unnamed_addr constant [2 x i8] c\"\\0A\\00\", align 1\n"
         "@.str_space = private unnamed_addr constant [2 x i8] c\" \\00\", align 1\n\n"
@@ -2664,6 +2666,18 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
     fprintf(gen->out, "; ===== Main Function =====\n\n");
     fprintf(gen->out, "define i32 @main(i32 %%argc, i8** %%argv) {\n");
     gen->indent_level = 1;
+
+    // Initialize GC
+    emit_indent(gen);
+    fprintf(gen->out, "call void @gc_init()\n");
+
+    // Set stack bottom for conservative scanning
+    emit_indent(gen);
+    fprintf(gen->out, "%%stack_anchor = alloca i8\n");
+    emit_indent(gen);
+    fprintf(gen->out, "%%stack_bottom_ptr = bitcast i8* %%stack_anchor to i8*\n");
+    emit_indent(gen);
+    fprintf(gen->out, "call void @gc_set_stack_bottom(i8* %%stack_bottom_ptr)\n\n");
 
     // Call set_cmd_args to store command line arguments
     emit_indent(gen);

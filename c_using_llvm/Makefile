@@ -20,7 +20,7 @@ LLVM_OBJS = $(LLVM_SRCS:.c=.o)
 LLVM_TARGET = codegen_llvm
 
 # Runtime library
-RUNTIME = runtime.o
+RUNTIME = runtime.o gc.o
 
 all: $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET)
 
@@ -39,17 +39,20 @@ $(INTERP_TARGET): $(INTERP_OBJS)
 $(COMPILER_TARGET): $(COMPILER_OBJS)
 	$(CC) $(CFLAGS) -o $(COMPILER_TARGET) $(COMPILER_OBJS) $(LIBS)
 
-$(RUNTIME): runtime.c runtime.h
-	$(CC) -c runtime.c -o $(RUNTIME)
+runtime.o: runtime.c runtime.h gc.h
+	$(CC) $(CFLAGS) -c runtime.c -o runtime.o
+
+gc.o: gc.c gc.h runtime.h
+	$(CC) $(CFLAGS) -c gc.c -o gc.o
 
 $(LLVM_TARGET): $(LLVM_OBJS) $(RUNTIME)
-	$(CC) $(CFLAGS) -o $(LLVM_TARGET) $(LLVM_OBJS) $(LIBS)
+	$(CC) $(CFLAGS) -o $(LLVM_TARGET) $(LLVM_OBJS) $(RUNTIME) $(LIBS)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -f $(INTERP_OBJS) $(COMPILER_OBJS) $(LLVM_OBJS) $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET) core/tiny.tab.c core/tiny.tab.h core/lex.yy.c runtime.o a.out
+	rm -f $(INTERP_OBJS) $(COMPILER_OBJS) $(LLVM_OBJS) $(INTERP_TARGET) $(COMPILER_TARGET) $(LLVM_TARGET) core/tiny.tab.c core/tiny.tab.h core/lex.yy.c runtime.o gc.o a.out
 
 test: $(INTERP_TARGET)
 	@echo "Testing interpreter with hello.tl:"

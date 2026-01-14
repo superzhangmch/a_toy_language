@@ -94,7 +94,7 @@ def run_llvm(test_file: Path):
             return compile_proc.returncode, compile_proc.stdout, compile_proc.stderr
 
         clang_proc = subprocess.run(
-            ["clang", "-O1", "-Wno-override-module", str(ll_path), "runtime.o", "-o", str(bin_path)],
+            ["clang", "-O1", "-Wno-override-module", str(ll_path), "runtime.o", "gc.o", "-o", str(bin_path)],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

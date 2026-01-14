@@ -1,10 +1,12 @@
 #include "runtime.h"
+#include "gc.h"
 #include <regex.h>
 #include <math.h>
 #include <ctype.h>
 #include <setjmp.h>
 #include <stdarg.h>
 #include "type_check_common.h"
+#include "gc.h"
 
 // Global storage for command line arguments
 static int g_argc = 0;
@@ -68,55 +70,7 @@ static __attribute__((noreturn)) void type_error(const char *fmt, ...) {
 #define REQUIRE_STRING_SUBSTRING(L) TC_REQUIRE_STRING_SUBSTRING((L))
 #define IS_NUMERIC(t) ((t) == TYPE_INT || (t) == TYPE_FLOAT)
 
-// Array structure
-typedef struct {
-    int size;
-    int capacity;
-    void *data;
-} Array;
-
-// Dict structure
-#define HASH_SIZE 256
-
-typedef struct DictEntry {
-    char *key;
-    Value value;
-    struct DictEntry *next;
-} DictEntry;
-
-typedef struct {
-    DictEntry **buckets;
-    int size;
-} Dict;
-
-// Class/object structures
-typedef struct MethodEntry {
-    char *name;
-    MethodFn fn;
-    int arity;
-    int is_private;
-} MethodEntry;
-
-typedef struct FieldEntry {
-    char *name;
-    FieldInitFn init_fn;
-    int is_private;
-} FieldEntry;
-
-typedef struct Class {
-    char *name;
-    MethodEntry *methods;
-    int method_count;
-    int method_capacity;
-    FieldEntry *fields;
-    int field_count;
-    int field_capacity;
-} Class;
-
-typedef struct Instance {
-    Class *cls;
-    Value fields; // dict value storing member fields
-} Instance;
+// Structures now defined in runtime.h
 
 // Track current method call stack for privacy checks
 static Instance *this_stack[256];
@@ -124,10 +78,10 @@ static int this_stack_top = 0;
 
 // Helper to create array
 static Array* new_array() {
-    Array *a = malloc(sizeof(Array));
+    Array *a = gc_alloc(TYPE_ARRAY, sizeof(Array));
     a->size = 0;
     a->capacity = 8;
-    a->data = malloc(8 * sizeof(Value));
+    a->data = gc_alloc(TYPE_ARRAY, 8 * sizeof(Value));
     return a;
 }
 
@@ -164,8 +118,14 @@ Value append(Value arr, Value val) {
     }
     Array *a = (Array*)(arr.data);
     if (a->size >= a->capacity) {
-        a->capacity *= 2;
-        a->data = realloc(a->data, a->capacity * sizeof(Value));
+        // Allocate new buffer with GC
+        int new_capacity = a->capacity * 2;
+        void *new_data = gc_alloc(TYPE_ARRAY, new_capacity * sizeof(Value));
+        // Copy old data
+        memcpy(new_data, a->data, a->size * sizeof(Value));
+        // Update array (old data will be collected by GC)
+        a->data = new_data;
+        a->capacity = new_capacity;
     }
     ((Value*)a->data)[a->size++] = val;
     Value result = {TYPE_BOOL, 0};
@@ -563,8 +523,8 @@ static unsigned int hash(const char *key) {
 
 // Create empty dict
 Value make_dict(void) {
-    Dict *d = malloc(sizeof(Dict));
-    d->buckets = calloc(HASH_SIZE, sizeof(DictEntry*));
+    Dict *d = gc_alloc(TYPE_DICT, sizeof(Dict));
+    d->buckets = gc_alloc(TYPE_DICT, HASH_SIZE * sizeof(DictEntry*));
     d->size = 0;
 
     Value result = {TYPE_DICT, (long)d};
@@ -1940,8 +1900,8 @@ static MethodEntry* find_method_entry(Class *cls, const char *name) {
 }
 
 Value make_class(char *name) {
-    Class *cls = malloc(sizeof(Class));
-    cls->name = strdup(name);
+    Class *cls = gc_alloc(TYPE_CLASS, sizeof(Class));
+    cls->name = strdup(name);  // Keep strdup for simplicity
     cls->methods = NULL;
     cls->method_count = 0;
     cls->method_capacity = 0;
@@ -1986,7 +1946,7 @@ Value instantiate_class(Value class_val, Value *args, int arg_count) {
     }
     Class *cls = (Class*)class_val.data;
 
-    Instance *inst = malloc(sizeof(Instance));
+    Instance *inst = gc_alloc(TYPE_INSTANCE, sizeof(Instance));
     inst->cls = cls;
     inst->fields = make_dict();
 

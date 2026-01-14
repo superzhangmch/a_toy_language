@@ -22,9 +22,58 @@ typedef struct {
     long data;
 } Value;
 
+// Array structure
+typedef struct Array {
+    int size;
+    int capacity;
+    void *data;
+} Array;
+
+// Dict structure
+#define HASH_SIZE 256
+
+typedef struct DictEntry {
+    char *key;
+    Value value;
+    struct DictEntry *next;
+} DictEntry;
+
+typedef struct Dict {
+    DictEntry **buckets;
+    int size;
+} Dict;
+
 // Class/instance helpers
 typedef Value (*MethodFn)(Value this_val, Value *args, int arg_count);
 typedef Value (*FieldInitFn)(Value this_val);
+
+typedef struct MethodEntry {
+    char *name;
+    MethodFn fn;
+    int arity;
+    int is_private;
+} MethodEntry;
+
+typedef struct FieldEntry {
+    char *name;
+    FieldInitFn init_fn;
+    int is_private;
+} FieldEntry;
+
+typedef struct Class {
+    char *name;
+    MethodEntry *methods;
+    int method_count;
+    int method_capacity;
+    FieldEntry *fields;
+    int field_count;
+    int field_capacity;
+} Class;
+
+typedef struct Instance {
+    Class *cls;
+    Value fields; // dict value storing member fields
+} Instance;
 
 // Runtime functions
 Value make_array(void);

@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
 
     // Compile LLVM IR to executable using system clang with runtime library
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "clang -Wno-override-module %s runtime.o -o %s", ll_file, output_file);
+    snprintf(cmd, sizeof(cmd), "clang -Wno-override-module %s runtime.o gc.o -o %s", ll_file, output_file);
     run_command(cmd);
 
     // Cleanup
