@@ -334,8 +334,11 @@ Value slice_access(Value obj, Value start_v, Value end_v) {
         for (long i = start; i < end; i++) {
             Value elem = ((Value*)a->data)[i];
             if (new_a->size >= new_a->capacity) {
+                int old_capacity = new_a->capacity;
                 new_a->capacity *= 2;
-                new_a->data = realloc(new_a->data, new_a->capacity * sizeof(Value));
+                new_a->data = gc_realloc(new_a->data, TYPE_ARRAY,
+                                         old_capacity * sizeof(Value),
+                                         new_a->capacity * sizeof(Value));
             }
             ((Value*)new_a->data)[new_a->size++] = elem;
         }
@@ -738,6 +741,9 @@ Value in_operator(Value left, Value right, int line, const char *file) {
 
     } else {
         REQUIRE_IN_RIGHT(right);
+        // Never reached (REQUIRE_IN_RIGHT exits), but satisfies compiler
+        Value result = {TYPE_BOOL, 0};
+        return result;
     }
 }
 
@@ -1111,8 +1117,11 @@ Value regexp_find(Value pattern_val, Value str_val) {
 
             // Add to result array
             if (result_arr->size >= result_arr->capacity) {
+                int old_capacity = result_arr->capacity;
                 result_arr->capacity *= 2;
-                result_arr->data = realloc(result_arr->data, result_arr->capacity * sizeof(Value));
+                result_arr->data = gc_realloc(result_arr->data, TYPE_ARRAY,
+                                              old_capacity * sizeof(Value),
+                                              result_arr->capacity * sizeof(Value));
             }
 
             Value matched_val = {TYPE_STRING, (long)matched};
@@ -1272,8 +1281,11 @@ Value str_split(Value str_val, Value sep_val) {
 
         // Add to result array
         if (result_arr->size >= result_arr->capacity) {
+            int old_capacity = result_arr->capacity;
             result_arr->capacity *= 2;
-            result_arr->data = realloc(result_arr->data, result_arr->capacity * sizeof(Value));
+            result_arr->data = gc_realloc(result_arr->data, TYPE_ARRAY,
+                                          old_capacity * sizeof(Value),
+                                          result_arr->capacity * sizeof(Value));
         }
 
         Value part_val = {TYPE_STRING, (long)part};
@@ -1286,8 +1298,11 @@ Value str_split(Value str_val, Value sep_val) {
     // Add remaining part after last separator
     char *last_part = strdup(current);
     if (result_arr->size >= result_arr->capacity) {
+        int old_capacity = result_arr->capacity;
         result_arr->capacity *= 2;
-        result_arr->data = realloc(result_arr->data, result_arr->capacity * sizeof(Value));
+        result_arr->data = gc_realloc(result_arr->data, TYPE_ARRAY,
+                                      old_capacity * sizeof(Value),
+                                      result_arr->capacity * sizeof(Value));
     }
     Value last_val = {TYPE_STRING, (long)last_part};
     ((Value*)result_arr->data)[result_arr->size++] = last_val;
@@ -2157,8 +2172,11 @@ Value cmd_args(void) {
 
         Value *elements = (Value*)arr->data;
         if (arr->size >= arr->capacity) {
+            int old_capacity = arr->capacity;
             arr->capacity *= 2;
-            arr->data = realloc(arr->data, arr->capacity * sizeof(Value));
+            arr->data = gc_realloc(arr->data, TYPE_ARRAY,
+                                   old_capacity * sizeof(Value),
+                                   arr->capacity * sizeof(Value));
             elements = (Value*)arr->data;
         }
         elements[arr->size++] = str_val;

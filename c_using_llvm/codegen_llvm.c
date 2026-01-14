@@ -834,7 +834,8 @@ static void emit_runtime_impl(LLVMCodeGen *gen) {
         "declare void @print_value(%%Value)\n"
         "declare void @set_cmd_args(i32, i8**)\n"
         "declare void @gc_init()\n"
-        "declare void @gc_set_stack_bottom(i8*)\n\n"
+        "declare void @gc_set_stack_bottom(i8*)\n"
+        "declare void @gc_push_root(%%Value*)\n\n"
 
         "@.str_newline = private unnamed_addr constant [2 x i8] c\"\\0A\\00\", align 1\n"
         "@.str_space = private unnamed_addr constant [2 x i8] c\" \\00\", align 1\n\n"
@@ -2684,6 +2685,19 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
     // Call set_cmd_args to store command line arguments
     emit_indent(gen);
     fprintf(gen->out, "call void @set_cmd_args(i32 %%argc, i8** %%argv)\n\n");
+
+    // Register global variables as GC roots
+    VarMapping *global_var = gen->var_mappings;
+    while (global_var != NULL) {
+        if (global_var->is_global) {
+            emit_indent(gen);
+            fprintf(gen->out, "call void @gc_push_root(%%Value* @%s)\n", global_var->unique_name);
+        }
+        global_var = global_var->next;
+    }
+    if (gen->var_mappings) {
+        fprintf(gen->out, "\n");
+    }
 
     stmt = root->data.program.statements;
     while (stmt != NULL) {

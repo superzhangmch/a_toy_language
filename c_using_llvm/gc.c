@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 // Global GC instance
 GC gc;
@@ -21,6 +22,11 @@ void gc_init(void) {
     gc.total_objects_freed = 0;
     gc.total_bytes_freed = 0;
 
+    // Initialize hash table
+    for (int i = 0; i < GC_HASH_SIZE; i++) {
+        gc.hash_table[i] = NULL;
+    }
+
     printf("GC: Initialized (threshold: %d objects)\n", gc.max_objects);
 }
 
@@ -39,8 +45,9 @@ static void* gcobject_to_ptr(GCObject *obj) {
     return (void*)(obj + 1);
 }
 
-// Forward declaration
+// Forward declarations
 static void mark_value(Value *v);
+static GCObject* find_gc_object(void *ptr);
 
 // Mark an array's elements
 static void mark_array(Array *a) {
@@ -48,16 +55,17 @@ static void mark_array(Array *a) {
 
     // Mark the data buffer itself (it's also a GC object)
     if (a->data) {
-        GCObject *data_obj = ptr_to_gcobject(a->data);
-        if (!data_obj->marked) {
+        // Validate that a->data points to a valid GC object
+        GCObject *data_obj = find_gc_object(a->data);
+        if (data_obj && !data_obj->marked) {
             data_obj->marked = 1;
-        }
-    }
 
-    // Mark the element values
-    Value *elements = (Value*)a->data;
-    for (int i = 0; i < a->size; i++) {
-        mark_value(&elements[i]);
+            // Mark the element values
+            Value *elements = (Value*)a->data;
+            for (int i = 0; i < a->size; i++) {
+                mark_value(&elements[i]);
+            }
+        }
     }
 }
 
@@ -123,9 +131,19 @@ static void mark_value(Value *v) {
     }
 }
 
-// Check if a pointer points to a GC object
+// Hash function for pointer addresses
+static inline size_t hash_ptr(void *ptr) {
+    uintptr_t addr = (uintptr_t)ptr;
+    // Simple hash: use middle bits of address
+    return (addr >> 3) % GC_HASH_SIZE;
+}
+
+// Check if a pointer points to a GC object (optimized with hash table)
 static GCObject* find_gc_object(void *ptr) {
-    for (GCObject *obj = gc.all_objects; obj; obj = obj->next) {
+    size_t hash = hash_ptr(ptr);
+
+    // Search in hash bucket
+    for (GCObject *obj = gc.hash_table[hash]; obj; obj = obj->hash_next) {
         void *obj_start = gcobject_to_ptr(obj);
         void *obj_end = (char*)obj_start + obj->size;
 
@@ -159,9 +177,14 @@ static void scan_stack(void) {
         end = tmp;
     }
 
-    // Scan every byte to catch all possible pointer alignments (maximally conservative)
-    // This ensures we don't miss pointers that are misaligned
-    for (char *p = (char*)start; p + sizeof(void*) <= (char*)end; p++) {
+    // Scan stack with 8-byte alignment (word-aligned)
+    // More efficient than byte-by-byte scanning while still conservative
+    size_t word_size = sizeof(void*);
+
+    // Align start pointer to word boundary
+    char *aligned_start = (char*)((((uintptr_t)start + word_size - 1) / word_size) * word_size);
+
+    for (char *p = aligned_start; p + word_size <= (char*)end; p += word_size) {
         void *potential_ptr = *(void**)p;
 
         // Skip null pointers
@@ -175,11 +198,10 @@ static void scan_stack(void) {
         // Check if this looks like a heap pointer
         GCObject *obj = find_gc_object(potential_ptr);
         if (obj && !obj->marked) {
-            obj->marked = 1;
-
             // Recursively mark based on object type
             // IMPORTANT: Use the correct object start pointer, not potential_ptr
             // (which might be an interior pointer)
+            // DON'T set marked=1 here - let mark_value() do it!
             Value v;
             v.data = (long)gcobject_to_ptr(obj);
             v.type = obj->type;
@@ -195,8 +217,8 @@ static void mark_from_roots(void) {
 
     // Also mark from explicit roots (if any)
     for (int i = 0; i < gc.root_count; i++) {
-        if (gc.roots[i] && *gc.roots[i]) {
-            mark_value(*gc.roots[i]);
+        if (gc.roots[i]) {
+            mark_value(gc.roots[i]);
         }
     }
 }
@@ -211,6 +233,18 @@ static void sweep(void) {
         if (!obj->marked) {
             // Unmarked - remove from list and free
             *obj_ptr = obj->next;
+
+            // Remove from hash table
+            void *ptr = gcobject_to_ptr(obj);
+            size_t hash = hash_ptr(ptr);
+            GCObject **hash_ptr = &gc.hash_table[hash];
+            while (*hash_ptr) {
+                if (*hash_ptr == obj) {
+                    *hash_ptr = obj->hash_next;
+                    break;
+                }
+                hash_ptr = &(*hash_ptr)->hash_next;
+            }
 
             gc.heap_size -= obj->size;
             gc.num_objects--;
@@ -252,9 +286,31 @@ void gc_collect(void) {
         gc.max_objects = 100;  // Minimum threshold
     }
 
-    printf("GC: Collected %d objects (%zu bytes), %d objects (%zu bytes) remain, next threshold: %d\n",
-           freed_objects, freed_bytes,
-           after, after_size, gc.max_objects);
+    // Uncomment for debugging:
+    // printf("GC: Collected %d objects (%zu bytes), %d objects (%zu bytes) remain, next threshold: %d\n",
+    //        freed_objects, freed_bytes,
+    //        after, after_size, gc.max_objects);
+}
+
+// Reallocate GC-managed memory (like realloc but for GC)
+void* gc_realloc(void *old_ptr, int type, size_t old_size, size_t new_size) {
+    if (!old_ptr) {
+        return gc_alloc(type, new_size);
+    }
+
+    if (new_size <= old_size) {
+        // No need to reallocate if shrinking or same size
+        return old_ptr;
+    }
+
+    // Allocate new memory
+    void *new_ptr = gc_alloc(type, new_size);
+
+    // Copy old data
+    memcpy(new_ptr, old_ptr, old_size);
+
+    // Old memory will be collected by GC
+    return new_ptr;
 }
 
 // Allocate object with GC
@@ -288,11 +344,14 @@ void* gc_alloc(int type, size_t size) {
     obj->next = gc.all_objects;
     gc.all_objects = obj;
 
+    // Add to hash table for fast lookup
+    void *ptr = gcobject_to_ptr(obj);
+    size_t hash = hash_ptr(ptr);
+    obj->hash_next = gc.hash_table[hash];
+    gc.hash_table[hash] = obj;
+
     gc.num_objects++;
     gc.heap_size += size;
-
-    // Return pointer to data (after header)
-    void *ptr = gcobject_to_ptr(obj);
 
     // Update heap address range for fast filtering in stack scan
     void *obj_start = (void*)obj;
@@ -313,7 +372,7 @@ void gc_push_root(Value *v) {
         exit(1);
     }
 
-    gc.roots[gc.root_count++] = &v;
+    gc.roots[gc.root_count++] = v;
 }
 
 // Pop a root from the root stack

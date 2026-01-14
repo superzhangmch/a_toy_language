@@ -10,13 +10,17 @@ typedef struct GCObject {
     int marked;                 // Mark bit for GC
     size_t size;                // Size of the object data
     struct GCObject *next;      // Linked list of all objects
+    struct GCObject *hash_next; // Linked list in hash bucket
 } GCObject;
 
 // Root stack for tracking Value* on stack
 #define MAX_ROOTS 1024
 
+// Hash table for fast object lookup
+#define GC_HASH_SIZE 1024
+
 typedef struct {
-    Value **roots[MAX_ROOTS];   // Stack of pointers to Value variables
+    Value *roots[MAX_ROOTS];    // Stack of pointers to Value structs
     int root_count;             // Current number of roots
 
     GCObject *all_objects;      // Linked list of all allocated objects
@@ -32,6 +36,9 @@ typedef struct {
     void *heap_start;           // Lowest heap address seen
     void *heap_end;             // Highest heap address seen
 
+    // Hash table for O(1) object lookup during stack scanning
+    GCObject *hash_table[GC_HASH_SIZE];
+
     // Cumulative statistics
     int total_collections;      // Total number of GC runs
     int total_objects_freed;    // Total objects freed across all collections
@@ -45,6 +52,7 @@ extern GC gc;
 void gc_init(void);
 void gc_set_stack_bottom(void *bottom);  // Set stack bottom for scanning
 void* gc_alloc(int type, size_t size);
+void* gc_realloc(void *old_ptr, int type, size_t old_size, size_t new_size);
 void gc_collect(void);
 
 // Root management - called by generated code
