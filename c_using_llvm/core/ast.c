@@ -106,6 +106,12 @@ ASTNode *create_var_decl(char *name, ASTNode *value) {
     return node;
 }
 
+ASTNode *create_multi_var_decl(ASTNodeList *declarations) {
+    ASTNode *node = create_node(NODE_MULTI_VAR_DECL);
+    node->data.multi_var_decl.declarations = declarations;
+    return node;
+}
+
 ASTNode *create_assignment(ASTNode *target, ASTNode *value) {
     ASTNode *node = create_node(NODE_ASSIGNMENT);
     node->data.assignment.target = target;

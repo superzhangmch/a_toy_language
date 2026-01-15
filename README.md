@@ -16,6 +16,8 @@ $ROOT/
 var a = '1'; # 一次定义一个, 必须当场赋值
 ```
 
+if / for / while 的 block 中定义的变量, 都是本地的; try/catch 的非本地
+
 ### 数据类型
 - **bool**: true|false
 - **int**: 整数
@@ -63,17 +65,17 @@ for (idx in $st .. $end) { ...  break/continue ... }
 for (idx in $end .. $st) { ...  break/continue ... }
 
 # 遍历
-foreach (key => val in $dict) {
+for (key => val in $dict) {
    .../break/continue/...
 }
-foreach (idx => list[idx] in $list) {
+for (idx => list[idx] in $list) {
    .../break/continue/...
 }
 ```
 
 ### 函数
 ```python
-func factorial(n) {
+fun factorial(n) {
     if (n <= 1) {
         return 1
     }
@@ -91,26 +93,26 @@ class Counter {
   var count = 0
   var _hidden = "secret"
 
-  func init(name, start) {
+  fun init(name, start) {
     this.name = name
     this.count = start
   }
   var name = ""
 
-  func inc() {
+  fun inc() {
     this.count = this.count + 1
     return this.count
   }
 
-  func _gen_label()
+  fun _gen_label()
   {
     return this.name + ": " + str(this.count)
   }
-  func label() {
+  fun label() {
     return this._gen_label();
   }
 
-  func copySecret(other) {
+  fun copySecret(other) {
     # 同一个类内可以访问私有成员
     return other._hidden
   }
@@ -126,9 +128,9 @@ println(c.copySecret(c))
 ### 异常处理
 ```python
 try {
-  ... code 
+  ... code ... # 不引入新的变量scope
 } catch err_msg {
-  ... 
+  ... code ... # 不引入新的变量scope
 }
 
 # how to raise an exception
@@ -148,6 +150,7 @@ include_once $code_file
 
 - `print(x, y, ..)` - 打印
 - `println(x, ..)` - 打印同时换行
+- `p(x, ..)` - same as println
 
 - `len(x)` - 获取长度
 - `append(arr, val)` - 添加到数组

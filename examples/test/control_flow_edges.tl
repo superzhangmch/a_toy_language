@@ -1,27 +1,27 @@
 ### Edge cases for control flow
 ### - nested loops with break/continue
-### - foreach over empty collections
+### - for over empty collections
 ### - shadowing across nested blocks
 ### - invalid break/continue outside loops should error
 
-# nested foreach inside while
+# nested for inside while
 var outer_sum = 0;
 var i = 0;
 while (i < 3) {
   var inner = [1, 2, 3];
-  foreach (idx => val in inner) {
+  for (idx => val in inner) {
     outer_sum += val;
   }
   i += 1;
 }
 println("output_1", outer_sum);
 
-# foreach over empty array/dict executes zero times
+# for over empty array/dict executes zero times
 var hit = 0;
-foreach (k => v in []) {
+for (k => v in []) {
   hit += 1;
 }
-foreach (k => v in {}) {
+for (k => v in {}) {
   hit += 1;
 }
 println("output_2", hit);

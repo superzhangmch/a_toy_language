@@ -24,7 +24,7 @@ PreprocessResult g_pp_result;
 %token <bval> TRUE FALSE
 %token NULL_LITERAL
 
-%token VAR FUNC RETURN IF ELSE WHILE FOR FOREACH IN NOT_IN BREAK CONTINUE CLASS NEW
+%token VAR FUN RETURN IF ELSE WHILE FOR IN NOT_IN BREAK CONTINUE CLASS NEW
 %token TRY CATCH RAISE ASSERT
 %token AND OR NOT
 %token PLUS MINUS MULTIPLY DIVIDE MODULO
@@ -36,9 +36,9 @@ PreprocessResult g_pp_result;
 %type <node> program statement expression primary_expr postfix_expr
 %type <node> unary_expr multiplicative_expr additive_expr comparison_expr
 %type <node> equality_expr logical_and_expr logical_or_expr
-%type <node> var_decl func_def return_stmt if_stmt while_stmt foreach_stmt for_stmt class_def
+%type <node> var_decl func_def return_stmt if_stmt while_stmt for_stmt class_def
 %type <node> assignment array_literal dict_literal
-%type <list> statement_list expr_list param_list array_expr_list dict_pair_list_opt
+%type <list> statement_list expr_list param_list array_expr_list dict_pair_list_opt var_decl_list
 %type <class_parts> class_member_list
 
 %left OR
@@ -83,7 +83,6 @@ statement:
     | return_stmt opt_semicolon
     | if_stmt
     | while_stmt
-    | foreach_stmt
     | for_stmt
     | class_def
     | TRY LBRACE statement_list RBRACE CATCH IDENTIFIER LBRACE statement_list RBRACE {
@@ -114,13 +113,43 @@ opt_semicolon:
     ;
 
 var_decl:
-    VAR IDENTIFIER ASSIGN expression {
-        $$ = create_var_decl($2, $4);
+    VAR var_decl_list {
+        /* If single declaration, return it directly; otherwise wrap in multi_var_decl */
+        if ($2 != NULL && $2->next == NULL) {
+            $$ = $2->node;
+        } else {
+            $$ = create_multi_var_decl($2);
+        }
+    }
+    ;
+
+var_decl_list:
+    IDENTIFIER {
+        /* Variable without initializer defaults to null */
+        ASTNode *null_val = create_null_literal();
+        ASTNode *decl = create_var_decl($1, null_val);
+        $$ = create_node_list(decl);
+    }
+    | IDENTIFIER ASSIGN expression {
+        /* Variable with initializer */
+        ASTNode *decl = create_var_decl($1, $3);
+        $$ = create_node_list(decl);
+    }
+    | var_decl_list COMMA IDENTIFIER {
+        /* Add variable without initializer to list */
+        ASTNode *null_val = create_null_literal();
+        ASTNode *decl = create_var_decl($3, null_val);
+        $$ = append_node_list($1, decl);
+    }
+    | var_decl_list COMMA IDENTIFIER ASSIGN expression {
+        /* Add variable with initializer to list */
+        ASTNode *decl = create_var_decl($3, $5);
+        $$ = append_node_list($1, decl);
     }
     ;
 
 func_def:
-    FUNC IDENTIFIER LPAREN param_list RPAREN LBRACE statement_list RBRACE {
+    FUN IDENTIFIER LPAREN param_list RPAREN LBRACE statement_list RBRACE {
         $$ = create_func_def($2, $4, $7);
     }
     ;
@@ -187,14 +216,13 @@ while_stmt:
     }
     ;
 
-foreach_stmt:
-        FOREACH LPAREN IDENTIFIER ARROW IDENTIFIER IN expression RPAREN LBRACE statement_list RBRACE {
+for_stmt:
+    FOR LPAREN IDENTIFIER ARROW IDENTIFIER IN expression RPAREN LBRACE statement_list RBRACE {
+        /* Iterator loop: for (key => value in collection) */
         $$ = create_foreach_stmt($3, $5, $7, $10);
     }
-    ;
-
-for_stmt:
-    FOR LPAREN IDENTIFIER ASSIGN expression range_op expression RPAREN LBRACE statement_list RBRACE {
+    | FOR LPAREN IDENTIFIER ASSIGN expression range_op expression RPAREN LBRACE statement_list RBRACE {
+        /* Range loop: for (idx = start..end) */
         $$ = create_for_stmt($3, $5, $7, $10);
     }
     ;

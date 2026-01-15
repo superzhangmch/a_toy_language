@@ -3,7 +3,7 @@
 ### 2. len(str|list|dict)
 ### 3. list: append(..)
 ### 4. dict/lsit: remove items
-### 5. dict/list: foreach iteration
+### 5. dict/list: for iteration
 ### 6. type(..): for class obj, should return class name
 ### 7. dict: add new kv, delete kv, update the value of a key
 ### 8. list: update the value of a element
@@ -30,21 +30,21 @@ remove(d, "x");
 println("output_4", d["y"]);
 
 var sum_arr = 0;
-foreach (idx => ele in arr) {
+for (idx => ele in arr) {
   sum_arr += ele;
 }
 println("output_5", sum_arr);
 
 var sum_dict = 0;
-foreach (k => v in d) {
+for (k => v in d) {
   sum_dict += v;
 }
 println("output_6", sum_dict);
 
 class Foo {
   var v = 0;
-  func init(x) { this.v = x; }
-  func get() { return this.v; }
+  fun init(x) { this.v = x; }
+  fun get() { return this.v; }
 }
 var foo = new Foo(9);
 println("output_7", type(foo));

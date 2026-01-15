@@ -1273,6 +1273,16 @@ static void eval_statement(ASTNode *node) {
             eval_var_decl(node);
             break;
 
+        case NODE_MULTI_VAR_DECL: {
+            /* Evaluate each declaration in the list */
+            ASTNodeList *decl_list = node->data.multi_var_decl.declarations;
+            while (decl_list != NULL) {
+                eval_var_decl(decl_list->node);
+                decl_list = decl_list->next;
+            }
+            break;
+        }
+
         case NODE_ASSIGNMENT:
             eval_assignment(node);
             break;

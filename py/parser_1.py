@@ -67,7 +67,7 @@ class Parser:
         stmt = None
         if token.type == TokenType.VAR:
             stmt = self.parse_var_declaration()
-        elif token.type == TokenType.FUNC:
+        elif token.type == TokenType.FUN:
             return self.parse_function_def()  # Functions don't have semicolons
         elif token.type == TokenType.RETURN:
             stmt = self.parse_return()
@@ -76,9 +76,7 @@ class Parser:
         elif token.type == TokenType.WHILE:
             return self.parse_while_statement()  # While loops don't have semicolons
         elif token.type == TokenType.FOR:
-            return self.parse_for_statement()
-        elif token.type == TokenType.FOREACH:
-            return self.parse_foreach_statement()  # Foreach loops don't have semicolons
+            return self.parse_for_statement()  # Handles both range and iterator for loops
         elif token.type == TokenType.CLASS:
             return self.parse_class_def()
         elif token.type == TokenType.TRY:
@@ -133,12 +131,42 @@ class Parser:
 
         return stmt
 
-    def parse_var_declaration(self) -> VarDeclaration:
+    def parse_var_declaration(self):
+        """
+        Parse variable declaration(s):
+        - Single: var a = 1
+        - Multiple: var a, b=1, c (uninitialized vars default to null)
+        """
+        from ast_nodes_2 import MultiVarDeclaration, NullLiteral
+
         self.expect(TokenType.VAR)
-        name_token = self.expect(TokenType.IDENTIFIER)
-        self.expect(TokenType.ASSIGN)
-        value = self.parse_expression()
-        return VarDeclaration(name_token.value, value)
+        declarations = []
+
+        while True:
+            name_token = self.expect(TokenType.IDENTIFIER)
+
+            # Check if there's an initializer
+            if self.current_token().type == TokenType.ASSIGN:
+                self.advance()
+                value = self.parse_expression()
+            else:
+                # Default to null if no initializer
+                value = NullLiteral()
+
+            declarations.append(VarDeclaration(name_token.value, value))
+
+            # Check for more declarations
+            if self.current_token().type == TokenType.COMMA:
+                self.advance()
+                continue
+            else:
+                break
+
+        # Return single declaration for backward compatibility, or multi for multiple
+        if len(declarations) == 1:
+            return declarations[0]
+        else:
+            return MultiVarDeclaration(declarations)
 
     def attach_meta(self, node: ASTNode, token: Token) -> ASTNode:
         setattr(node, "line", token.line)
@@ -148,9 +176,9 @@ class Parser:
     def parse_function_def(self) -> FunctionDef:
         """
         函数调用
-        func $func_name($arg1, $arg2, ..) { ... }
+        fun $func_name($arg1, $arg2, ..) { ... }
         """
-        self.expect(TokenType.FUNC)                          # func 关键词
+        self.expect(TokenType.FUN)                           # fun 关键词
         name_token = self.expect(TokenType.IDENTIFIER)       # 函数名
         self.expect(TokenType.LPAREN)                        # (
 
@@ -192,7 +220,7 @@ class Parser:
                 members.append(member)
                 if self.current_token().type == TokenType.SEMICOLON:
                     self.advance()
-            elif self.current_token().type == TokenType.FUNC:
+            elif self.current_token().type == TokenType.FUN:
                 methods.append(self.parse_function_def())
             else:
                 self.error(f"Unexpected token in class body: {self.current_token().type}")
@@ -297,79 +325,78 @@ class Parser:
 
     def parse_for_statement(self):
         """
-        for (idx = st .. end) {...}
+        Handles both for loop syntaxes:
+        1. Range loop: for (idx = start .. end) {...}
+        2. Iterator loop: for (key => value in collection) {...}
         """
-        from ast_nodes_2 import ForStatement
+        from ast_nodes_2 import ForStatement, ForeachStatement
 
         self.expect(TokenType.FOR)
         self.expect(TokenType.LPAREN)
-        idx_tok = self.current_token()
-        if idx_tok.type != TokenType.IDENTIFIER:
-            self.error("for() needs index identifier")
-        idx = idx_tok.value
+
+        # Get first identifier
+        first_tok = self.current_token()
+        if first_tok.type != TokenType.IDENTIFIER:
+            self.error("for() needs identifier")
+        first_var = first_tok.value
         self.advance()
-        self.expect(TokenType.ASSIGN)
-        start = self.parse_expression()
-        if self.current_token().type == TokenType.DOTDOT:
+
+        # Disambiguate based on next token
+        next_token = self.current_token()
+
+        if next_token.type == TokenType.ASSIGN:
+            # Range loop: for (idx = start .. end)
+            self.advance()  # consume =
+            start = self.parse_expression()
+            if self.current_token().type == TokenType.DOTDOT:
+                self.advance()
+            elif self.current_token().type == TokenType.DOT and self.peek_token().type == TokenType.DOT:
+                self.advance()
+                self.advance()
+            else:
+                self.error("expected '..' in for range")
+            end = self.parse_expression()
+            self.expect(TokenType.RPAREN)
+            self.expect(TokenType.LBRACE)
+            body = []
+            while self.current_token().type != TokenType.RBRACE:
+                stmt = self.parse_statement()
+                if stmt:
+                    body.append(stmt)
+            self.expect(TokenType.RBRACE)
+            return ForStatement(first_var, start, end, body)
+
+        elif next_token.type == TokenType.ARROW:
+            # Iterator loop: for (key => value in collection)
+            self.advance()  # consume =>
+
+            # Parse value_var
+            value_token = self.current_token()
+            if value_token.type != TokenType.IDENTIFIER:
+                self.error(f"Expected identifier for value variable, got {value_token.type}")
+            value_var = value_token.value
             self.advance()
-        elif self.current_token().type == TokenType.DOT and self.peek_token().type == TokenType.DOT:
-            self.advance()
-            self.advance()
+
+            self.expect(TokenType.IN)  # in
+
+            # Parse collection expression
+            collection = self.parse_expression()
+
+            self.expect(TokenType.RPAREN)
+            self.expect(TokenType.LBRACE)
+
+            # Parse body
+            body = []
+            while self.current_token().type != TokenType.RBRACE:
+                stmt = self.parse_statement()
+                if stmt:
+                    body.append(stmt)
+
+            self.expect(TokenType.RBRACE)
+            return ForeachStatement(first_var, value_var, collection, body)
+
         else:
-            self.error("expected '..' in for range")
-        end = self.parse_expression()
-        self.expect(TokenType.RPAREN)
-        self.expect(TokenType.LBRACE)
-        body = []
-        while self.current_token().type != TokenType.RBRACE:
-            stmt = self.parse_statement()
-            if stmt:
-                body.append(stmt)
-        self.expect(TokenType.RBRACE)
-        return ForStatement(idx, start, end, body)
-
-    def parse_foreach_statement(self) -> 'ForeachStatement':
-        """
-        foreach(key_var => value_var in collection) {...}
-        """
-        from ast_nodes_2 import ForeachStatement
-
-        self.expect(TokenType.FOREACH)            # foreach
-        self.expect(TokenType.LPAREN)             # (
-
-        # Parse key_var
-        key_token = self.current_token()
-        if key_token.type != TokenType.IDENTIFIER:
-            self.error(f"Expected identifier for key variable, got {key_token.type}")
-        key_var = key_token.value
-        self.advance()
-
-        self.expect(TokenType.ARROW)              # =>
-
-        # Parse value_var
-        value_token = self.current_token()
-        if value_token.type != TokenType.IDENTIFIER:
-            self.error(f"Expected identifier for value variable, got {value_token.type}")
-        value_var = value_token.value
-        self.advance()
-
-        self.expect(TokenType.IN)                 # in
-
-        # Parse collection expression
-        collection = self.parse_expression()
-
-        self.expect(TokenType.RPAREN)             # )
-        self.expect(TokenType.LBRACE)             # {
-
-        # Parse body
-        body = []
-        while self.current_token().type != TokenType.RBRACE:
-            stmt = self.parse_statement()
-            if stmt:
-                body.append(stmt)
-
-        self.expect(TokenType.RBRACE)             # }
-        return ForeachStatement(key_var, value_var, collection, body)
+            self.error(f"Expected '=' or '=>' in for loop, got {next_token.type}")
 
     def parse_expression(self) -> ASTNode:
         return self.parse_logical_or()

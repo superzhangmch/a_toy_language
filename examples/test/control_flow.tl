@@ -1,12 +1,12 @@
 ### tests for 
 ###  - if-then-else
-###  - foreach(idx=> ele in arr) { FOREACH_BLOCK }
+###  - for(idx=> ele in arr) { FOREACH_BLOCK }
 ###    - idx and ele should be local variables as in the FOREACH_BLOCK
-###  - foreach(k=>v in dict) {..}
+###  - for(k=>v in dict) {..}
 ###    - k and v should be local variables as in the FOREACH_BLOCK
 ###  - while(..) {...}
 ###  - break, continue
-###  - var scope: if{NEW_SCOPE} else if {NEW_SCOPE} else {NEW_SCOPE}/ foreach(..) {NEW_SCOPE}/ while (..) {NEW_SCOPE}
+###  - var scope: if{NEW_SCOPE} else if {NEW_SCOPE} else {NEW_SCOPE}/ for(..) {NEW_SCOPE}/ while (..) {NEW_SCOPE}
 ###  - in NEW_SCOPE: global variables are accessable; locally defined variable using the same global var name will hide that global var
 
 var g = "global";
@@ -23,10 +23,10 @@ if (false) {
 }
 println("output_3", g);        # still global
 
-# foreach over array with continue/break
+# for over array with continue/break
 var nums = [1, 2, 3, 4];
 var sum_arr = 0;
-foreach (i => n in nums) {
+for (i => n in nums) {
   if (n < 0) {  # unreachable but covers continue syntax
     continue;
   }
@@ -37,11 +37,11 @@ foreach (i => n in nums) {
 }
 println("output_4", sum_arr);
 
-# foreach over dict
+# for over dict
 var d = {"a": 1, "b": 2};
 var cnt = 0;
 var sum_dict = 0;
-foreach (k => v in d) {
+for (k => v in d) {
   cnt += 1;
   sum_dict += v;
 }
@@ -64,10 +64,10 @@ while (i < 3) {
 }
 println("output_7", wsum);
 
-# foreach block variables are local and do not leak or overwrite outer vars
+# for block variables are local and do not leak or overwrite outer vars
 var idx = "outer_idx";
 var ele = "outer_ele";
-foreach (idx => ele in nums) {
+for (idx => ele in nums) {
   # shadow outer names inside loop
   if (idx == 0) {
     println("output_8", idx, ele);  # first element
@@ -77,7 +77,7 @@ println("output_9", idx, ele);  # outer values remain
 
 var k = "outer_k";
 var v = "outer_v";
-foreach (k => v in d) {
+for (k => v in d) {
   if (k == "a") {
     println("output_10", k, v);
   }

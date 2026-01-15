@@ -1,5 +1,5 @@
 # should error: wrong number of args in function call
-func add(a, b) {
+fun add(a, b) {
   return a + b;
 }
 

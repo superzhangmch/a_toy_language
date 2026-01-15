@@ -14,7 +14,7 @@ println("output_2", t2);
 var t3 = int(({} or "dict") and ("str" or 0));
 println("output_3", t3);
 
-class C { func init() {} }
+class C { fun init() {} }
 var obj = new C();
 if (obj) {
   println("output_4", "obj_true");

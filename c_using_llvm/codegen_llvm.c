@@ -239,6 +239,18 @@ static void preregister_globals_in_list(LLVMCodeGen *gen, ASTNodeList *list, int
             } else {
                 codegen_error(n, "Redefinition of '%s' in the same scope (codegen)", n->data.var_decl.name);
             }
+        } else if (is_global_scope && n->type == NODE_MULTI_VAR_DECL) {
+            /* Register each variable in the multi-declaration */
+            ASTNodeList *decl_list = n->data.multi_var_decl.declarations;
+            while (decl_list) {
+                ASTNode *decl = decl_list->node;
+                if (!find_var_mapping_current_scope(gen, decl->data.var_decl.name)) {
+                    create_unique_var_name(gen, decl->data.var_decl.name, 1);
+                } else {
+                    codegen_error(decl, "Redefinition of '%s' in the same scope (codegen)", decl->data.var_decl.name);
+                }
+                decl_list = decl_list->next;
+            }
         } else if (is_global_scope && n->type == NODE_CLASS_DEF) {
             if (find_var_mapping_current_scope(gen, n->data.class_def.name)) {
                 codegen_error(n, "Redefinition of class '%s' in the same scope (codegen)", n->data.class_def.name);
@@ -456,6 +468,14 @@ static void collect_strings_stmt(LLVMCodeGen *gen, ASTNode *node) {
         case NODE_VAR_DECL:
             collect_strings_expr(gen, node->data.var_decl.value);
             break;
+        case NODE_MULTI_VAR_DECL: {
+            ASTNodeList *decl_list = node->data.multi_var_decl.declarations;
+            while (decl_list) {
+                collect_strings_stmt(gen, decl_list->node);
+                decl_list = decl_list->next;
+            }
+            break;
+        }
         case NODE_ASSIGNMENT:
             collect_strings_expr(gen, node->data.assignment.target);
             collect_strings_expr(gen, node->data.assignment.value);
@@ -586,6 +606,14 @@ static void register_file_strings_stmt(LLVMCodeGen *gen, ASTNode *node) {
         case NODE_VAR_DECL:
             register_file_strings_expr(gen, node->data.var_decl.value);
             break;
+        case NODE_MULTI_VAR_DECL: {
+            ASTNodeList *decl_list = node->data.multi_var_decl.declarations;
+            while (decl_list) {
+                register_file_strings_stmt(gen, decl_list->node);
+                decl_list = decl_list->next;
+            }
+            break;
+        }
         case NODE_ASSIGNMENT:
             register_file_strings_expr(gen, node->data.assignment.target);
             register_file_strings_expr(gen, node->data.assignment.value);
@@ -1610,6 +1638,16 @@ static void gen_statement(LLVMCodeGen *gen, ASTNode *node) {
             } else {
                 fprintf(gen->out, "store %%Value %s, %%Value* %%%s\n",
                         val_temp, m->unique_name);
+            }
+            break;
+        }
+
+        case NODE_MULTI_VAR_DECL: {
+            /* Generate code for each declaration in the list */
+            ASTNodeList *decl_list = node->data.multi_var_decl.declarations;
+            while (decl_list != NULL) {
+                gen_statement(gen, decl_list->node);
+                decl_list = decl_list->next;
             }
             break;
         }

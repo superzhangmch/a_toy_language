@@ -108,6 +108,15 @@ class VarDeclaration(ASTNode):
 
 
 @dataclass
+class MultiVarDeclaration(ASTNode):
+    """
+    Represents multiple variable declarations in one statement
+    Example: var a, b=1, c
+    """
+    declarations: List[VarDeclaration]
+
+
+@dataclass
 class Assignment(ASTNode):
     target: ASTNode  # Can be Identifier or IndexAccess
     value: ASTNode

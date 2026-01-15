@@ -174,7 +174,7 @@ python run_tests.py --backend llvm
 ### 测试函数
 
 ```
-func add(a, b) {
+fun add(a, b) {
   return a + b;
 }
 
@@ -199,7 +199,7 @@ println("output_2", dict["key"]);
 ```
 var global = 10;
 
-func test() {
+fun test() {
   var local = 20;
   return global + local;
 }

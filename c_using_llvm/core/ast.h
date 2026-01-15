@@ -15,6 +15,7 @@ typedef enum {
     NODE_BINARY_OP,
     NODE_UNARY_OP,
     NODE_VAR_DECL,
+    NODE_MULTI_VAR_DECL,
     NODE_ASSIGNMENT,
     NODE_FUNC_DEF,
     NODE_FUNC_CALL,
@@ -94,6 +95,10 @@ struct ASTNode {
             char *name;
             ASTNode *value;
         } var_decl;
+
+        struct {
+            ASTNodeList *declarations;
+        } multi_var_decl;
 
         struct {
             ASTNode *target;
@@ -217,6 +222,7 @@ ASTNode *create_identifier(char *name);
 ASTNode *create_binary_op(ASTNode *left, Operator op, ASTNode *right);
 ASTNode *create_unary_op(Operator op, ASTNode *operand);
 ASTNode *create_var_decl(char *name, ASTNode *value);
+ASTNode *create_multi_var_decl(ASTNodeList *declarations);
 ASTNode *create_assignment(ASTNode *target, ASTNode *value);
 ASTNode *clone_ast_node(ASTNode *node);  // Clone AST node for compound assignment
 ASTNode *create_func_def(char *name, ASTNodeList *params, ASTNodeList *body);

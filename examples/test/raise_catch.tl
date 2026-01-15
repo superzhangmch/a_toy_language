@@ -34,7 +34,7 @@ try {
 # expect_2_has: caught in
 
 
-func add(a, b) {
+fun add(a, b) {
   assert (type(a) in ["int", "float"], "a type error:"+type(a));
   assert (type(b) in ["int", "float"], "a type error:"+type(b));
   return a+b;

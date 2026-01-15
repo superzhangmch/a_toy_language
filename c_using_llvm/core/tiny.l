@@ -21,13 +21,12 @@ extern int yylineno;
 #.*                     { /* skip comments */ }
 
 "var"                   { return VAR; }
-"func"                  { return FUNC; }
+"fun"                   { return FUN; }
 "return"                { return RETURN; }
 "if"                    { return IF; }
 "else"                  { return ELSE; }
 "while"                 { return WHILE; }
 "for"                   { return FOR; }
-"foreach"               { return FOREACH; }
 "in"                    { return IN; }
 "break"                 { return BREAK; }
 "continue"              { return CONTINUE; }

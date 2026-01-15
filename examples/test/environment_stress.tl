@@ -58,7 +58,7 @@ println(state);
 # expect: catch1
 
 # Test 4: Functions called in exception handlers preserve environment
-func modify_state(val) {
+fun modify_state(val) {
   return val * 2;
 }
 

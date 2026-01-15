@@ -4,30 +4,30 @@ class Adder {
 
   var _y = 'YY';
 
-  func init(a) {
+  fun init(a) {
     this.x = a;
   }
 
-  func get_local_gg() {
+  fun get_local_gg() {
     var gg = 321
     return gg
   }
-  func get_gg()
+  fun get_gg()
   {
-    return gg; # get global func
+    return gg; # get global fun
   }
 
-  func _get_y() {
+  fun _get_y() {
     return this._y
   }
-  func get_y() {
+  fun get_y() {
     return this._get_y();
   }
-  func add(x) {
+  fun add(x) {
     return this.x + x;
   }
 
-  func get_x() {return this.x}
+  fun get_x() {return this.x}
 }
 
 var a = new Adder(1);

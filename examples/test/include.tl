@@ -1,5 +1,5 @@
 ### test include/include_once
-### 1. include a file containing code snippet, and include in a func body.
+### 1. include a file containing code snippet, and include in a fun body.
 ### 2. include_once: 设计case
 ### 3. 其他
 
@@ -7,7 +7,7 @@ include "include_files/include_lib1.tl";
 
 println("output_1", add_inc(5));  # use function from included file
 
-func foo(v) {
+fun foo(v) {
   var local_base = v;
   include "include_files/include_body.tl";  # inserted inside function body
 }

@@ -18,7 +18,7 @@ try {
 # expect: caught_raise
 
 # Test 3: Catch runtime exception (assert)
-func validate(x) {
+fun validate(x) {
   assert(type(x) == "int", "must be int");
   return x;
 }

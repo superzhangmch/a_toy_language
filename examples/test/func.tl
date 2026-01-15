@@ -1,6 +1,6 @@
-### test func
-### 1. in func block, global vars should be accessable
-### 2. in func block: locally defined vars should hide global var with the same name
+### test fun
+### 1. in fun block, global vars should be accessable
+### 2. in fun block: locally defined vars should hide global var with the same name
 ### 3. return with value should work
 ### 4. return without value should work(return null)
 ### 5. 递归调用should work
@@ -9,22 +9,22 @@
 var g = 5;
 var shadow = 100;
 
-func see_globals() {
+fun see_globals() {
   println("output_1", g);
   var shadow = 1;
   println("output_2", shadow);
   println("output_3", g);
 }
 
-func ret_val() {
+fun ret_val() {
   return 42;
 }
 
-func ret_null() {
+fun ret_null() {
   return;
 }
 
-func fact(n) {
+fun fact(n) {
   if (n <= 1) {
     return 1;
   }
@@ -33,15 +33,15 @@ func fact(n) {
 
 class Box {
   var v = 0;
-  func init(x) {
+  fun init(x) {
     this.v = x;
   }
-  func get() {
+  fun get() {
     return this.v;
   }
 }
 
-func take_box(b) {
+fun take_box(b) {
   return b.get();
 }
 

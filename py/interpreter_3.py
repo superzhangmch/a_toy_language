@@ -546,6 +546,14 @@ class Interpreter:
             value = self.eval_expression(node.value)
             self.current_env.define(node.name, value)
 
+        elif isinstance(node, MultiVarDeclaration):
+            # 多个变量定义 (var a, b=1, c)
+            for decl in node.declarations:
+                if self.current_env.exists_current(decl.name):
+                    raise Exception(f"Redefinition of '{decl.name}' in the same scope")
+                value = self.eval_expression(decl.value)
+                self.current_env.define(decl.name, value)
+
         elif isinstance(node, Assignment):
             # 变量赋值
             value = self.eval_expression(node.value)

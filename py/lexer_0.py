@@ -26,14 +26,13 @@ class TokenType(Enum):
     # Identifiers and keywords
     IDENTIFIER = auto()
     VAR = auto()
-    FUNC = auto()
+    FUN = auto()
     RETURN = auto()
     IF = auto()
     THEN = auto()
     ELSE = auto()
     WHILE = auto()
     FOR = auto()
-    FOREACH = auto()
     IN = auto()
     NOT_IN = auto()
     BREAK = auto()
@@ -104,14 +103,13 @@ class Lexer:
         self.mapping = mapping or []
         self.keywords = {
             'var': TokenType.VAR,
-            'func': TokenType.FUNC,
+            'fun': TokenType.FUN,
             'return': TokenType.RETURN,
             'if': TokenType.IF,
             'then': TokenType.THEN,
             'else': TokenType.ELSE,
             'while': TokenType.WHILE,
             'for': TokenType.FOR,
-            'foreach': TokenType.FOREACH,
             'in': TokenType.IN,
             'not_in': TokenType.NOT_IN,
             'break': TokenType.BREAK,

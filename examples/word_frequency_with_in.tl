@@ -62,7 +62,7 @@ var word_list = []
 var freq_list = []
 
 var keys = keys(freq_dict)
-foreach(i => word in keys) {
+for(i => word in keys) {
     append(word_list, word)
     append(freq_list, freq_dict[word])
 }

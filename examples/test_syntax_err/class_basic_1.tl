@@ -3,17 +3,17 @@ class Adder {
 
   var _y = 'YY';
 
-  func init(a) {
+  fun init(a) {
     this.x = a;
   }
 
-  func _get_y() {
+  fun _get_y() {
     return this._y
   }
-  func get_y() {
+  fun get_y() {
     return this._get_y();
   }
-  func add(b) {
+  fun add(b) {
     return this.x + b;
   }
 }
