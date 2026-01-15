@@ -377,6 +377,7 @@ class Interpreter:
 
         self.global_env.define('print', builtin_print)
         self.global_env.define('println', builtin_println)
+        self.global_env.define('p', builtin_println)
         self.global_env.define('len', builtin_len)
         self.global_env.define('int', builtin_int)
         self.global_env.define('float', builtin_float)

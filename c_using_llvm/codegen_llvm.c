@@ -1246,7 +1246,7 @@ static void gen_expr(LLVMCodeGen *gen, ASTNode *node, char *result_var) {
                 }
                 emit_indent(gen);
                 fprintf(gen->out, "%s = call %%Value @make_int(i64 0)\n", result_var);
-            } else if (strcmp(node->data.func_call.name, "println") == 0) {
+            } else if (strcmp(node->data.func_call.name, "println") == 0 || strcmp(node->data.func_call.name, "p") == 0) {
                 for (int i = 0; i < arg_count; i++) {
                     emit_indent(gen);
                     fprintf(gen->out, "call void @print_value(%%Value %s)\n", arg_temps[i]);
@@ -2733,8 +2733,13 @@ void llvm_codegen_program(LLVMCodeGen *gen, ASTNode *root) {
     fprintf(gen->out, "call void @gc_set_stack_bottom(i8* %%stack_bottom_ptr)\n\n");
 
     // Call set_cmd_args to store command line arguments
+    // Skip argv[0] (executable name) so cmd_args() only returns program arguments
     emit_indent(gen);
-    fprintf(gen->out, "call void @set_cmd_args(i32 %%argc, i8** %%argv)\n\n");
+    fprintf(gen->out, "%%argc_adjusted = sub i32 %%argc, 1\n");
+    emit_indent(gen);
+    fprintf(gen->out, "%%argv_adjusted = getelementptr i8*, i8** %%argv, i32 1\n");
+    emit_indent(gen);
+    fprintf(gen->out, "call void @set_cmd_args(i32 %%argc_adjusted, i8** %%argv_adjusted)\n\n");
 
     // Register global variables as GC roots
     VarMapping *global_var = gen->var_mappings;

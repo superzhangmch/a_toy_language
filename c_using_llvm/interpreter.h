@@ -9,20 +9,20 @@
 // Interpreter-specific structures (not in runtime.h)
 // ============================================================================
 
-// Function represents a user-defined function in the interpreter
+// InterpreterFunction represents a user-defined function in the interpreter
 // This stores the AST for the function body, which is needed for interpretation
-typedef struct Function {
+typedef struct InterpreterFunction {
     char *name;
     ASTNodeList *params;
     ASTNodeList *body;
     struct Environment *env;  // Closure environment
-} Function;
+} InterpreterFunction;
 
 // ClassValue represents a class definition
 typedef struct ClassValue {
     char *name;
     ASTNodeList *members;   // Variable declarations
-    ASTNodeList *methods;   // Function definitions
+    ASTNodeList *methods;   // InterpreterFunction definitions
     struct Environment *env;
 } ClassValue;
 
@@ -56,5 +56,6 @@ int env_exists(Environment *env, char *name);
 void interpret(ASTNode *root);
 void interpret_init(void);
 void interpret_interactive(ASTNode *root);
+void* get_interactive_error_jmpbuf(void);  // Get setjmp buffer for interactive mode error handling
 
 #endif /* INTERPRETER_H */

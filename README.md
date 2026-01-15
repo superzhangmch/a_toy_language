@@ -61,7 +61,7 @@ if (condition) {
 while (condition) {
     ...  break/continue ...
 }
-for (idx in $st .. $end) { ...  break/continue ... }
+for (idx in $st .. $end) { ...  break/continue ... } # there should be spaces surrounding .., like for (i in 1 .. 10), not for (i in 1..10)
 for (idx in $end .. $st) { ...  break/continue ... }
 
 # 遍历
@@ -193,7 +193,7 @@ json:
 
 系统级:
 - `input()` - 读取用户输入
-- `cmd_args()` - 获得命令行参数
+- `cmd_args()` - 获得命令行参数. 获得不带脚本名的所有命令行参数到数组里
 - `gc_run()` - 垃圾回收
 - `gc_stat()` - 垃圾回收信息统计
 

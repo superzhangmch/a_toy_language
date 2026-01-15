@@ -1,6 +1,7 @@
 CC = gcc
 CFLAGS = -Wall -g -Icore
 LIBS = -lm
+READLINE_LIBS = -lreadline
 FLEX = flex
 BISON = bison
 
@@ -34,7 +35,7 @@ core/lex.yy.c: core/tiny.l core/tiny.tab.h
 core/ast.o: core/tiny.tab.h
 
 $(INTERP_TARGET): $(INTERP_OBJS) $(RUNTIME)
-	$(CC) $(CFLAGS) -o $(INTERP_TARGET) $(INTERP_OBJS) $(RUNTIME) $(LIBS)
+	$(CC) $(CFLAGS) -o $(INTERP_TARGET) $(INTERP_OBJS) $(RUNTIME) $(LIBS) $(READLINE_LIBS)
 
 $(COMPILER_TARGET): $(COMPILER_OBJS)
 	$(CC) $(CFLAGS) -o $(COMPILER_TARGET) $(COMPILER_OBJS) $(LIBS)

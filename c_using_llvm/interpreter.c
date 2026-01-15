@@ -6,7 +6,7 @@
  * - AST traversal and evaluation
  * - Variable scoping (Environment)
  * - Control flow (if/while/for/break/continue/return)
- * - Function calls and class instantiation
+ * - InterpreterFunction calls and class instantiation
  */
 
 #include <stdio.h>
@@ -52,6 +52,10 @@ static int this_stack_top = 0;
 static int err_line = -1;
 static const char *err_file = NULL;
 
+// Interactive mode flag
+static int is_interactive_mode = 0;
+static jmp_buf interactive_error_jmp;
+
 // ============================================================================
 // Forward declarations
 // ============================================================================
@@ -59,7 +63,7 @@ static const char *err_file = NULL;
 static Value eval_expression(ASTNode *node);
 static void eval_statement(ASTNode *node);
 static void execute_block(ASTNodeList *stmts);
-static Value call_function(Function *func, Value *args, int arg_count);
+static Value call_function(InterpreterFunction *func, Value *args, int arg_count);
 static Value call_method_internal(Value instance_val, const char *method_name, Value *args, int arg_count);
 
 // GC support: Mark all values in an environment
@@ -128,6 +132,12 @@ static __attribute__((noreturn)) void runtime_error(const char *fmt, ...) {
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fprintf(stderr, "\n");
+
+    // In interactive mode, jump back to the REPL loop instead of exiting
+    if (is_interactive_mode) {
+        longjmp(interactive_error_jmp, 1);
+    }
+
     exit(1);
 }
 
@@ -475,7 +485,7 @@ static Value eval_function_call(ASTNode *node) {
         }
         return make_null();
     }
-    if (strcmp(func_name, "println") == 0) {
+    if (strcmp(func_name, "println") == 0 || strcmp(func_name, "p") == 0) {
         for (int i = 0; i < arg_count; i++) {
             print_value(args[i]);
             if (i < arg_count - 1) printf(" ");
@@ -591,6 +601,12 @@ static Value eval_function_call(ASTNode *node) {
         return make_null();
     }
 
+    // Command line arguments
+    if (strcmp(func_name, "cmd_args") == 0) {
+        if (arg_count != 0) runtime_error("cmd_args requires 0 arguments");
+        return cmd_args();
+    }
+
     // User-defined function
     if (env_exists(current_env, func_name)) {
         Value func_val = env_get(current_env, func_name);
@@ -601,14 +617,14 @@ static Value eval_function_call(ASTNode *node) {
         }
 
         // It's a user function stored in the environment
-        Function *func = (Function*)func_val.data;
+        InterpreterFunction *func = (InterpreterFunction*)func_val.data;
         return call_function(func, args, arg_count);
     }
 
     runtime_error("Undefined function: %s", func_name);
 }
 
-static Value call_function(Function *func, Value *args, int arg_count) {
+static Value call_function(InterpreterFunction *func, Value *args, int arg_count) {
     // Count expected parameters
     int param_count = 0;
     ASTNodeList *param = func->params;
@@ -618,7 +634,7 @@ static Value call_function(Function *func, Value *args, int arg_count) {
     }
 
     if (arg_count != param_count) {
-        runtime_error("Function '%s' expects %d arguments, got %d",
+        runtime_error("InterpreterFunction '%s' expects %d arguments, got %d",
                      func->name, param_count, arg_count);
     }
 
@@ -687,7 +703,7 @@ static Value call_method_internal(Value instance_val, const char *method_name, V
         if (method->node->type == NODE_FUNC_DEF) {
             if (strcmp(method->node->data.func_def.name, method_name) == 0) {
                 // Found the method
-                Function func;
+                InterpreterFunction func;
                 func.name = method->node->data.func_def.name;
                 func.params = method->node->data.func_def.params;
                 func.body = method->node->data.func_def.body;
@@ -1080,7 +1096,7 @@ static void eval_return(ASTNode *node) {
 static void eval_func_def(ASTNode *node) {
     set_error_ctx(node->line, node->file);
 
-    Function *func = malloc(sizeof(Function));
+    InterpreterFunction *func = malloc(sizeof(InterpreterFunction));
     func->name = node->data.func_def.name;
     func->params = node->data.func_def.params;
     func->body = node->data.func_def.body;
@@ -1394,6 +1410,7 @@ void interpret(ASTNode *root) {
 void interpret_init(void) {
     global_env = create_environment(NULL);
     current_env = global_env;
+    is_interactive_mode = 1;  // Enable interactive mode error handling
 }
 
 // Execute statements in interactive mode (preserves global environment)
@@ -1419,4 +1436,9 @@ void interpret_interactive(ASTNode *root) {
         // Execute single statement
         eval_statement(root);
     }
+}
+
+// Get pointer to interactive error jmpbuf for setjmp in main
+void* get_interactive_error_jmpbuf(void) {
+    return &interactive_error_jmp;
 }

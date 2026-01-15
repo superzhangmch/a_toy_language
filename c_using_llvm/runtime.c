@@ -2176,10 +2176,9 @@ void set_cmd_args(int argc, char **argv) {
 // Get command line arguments (called from LLVM generated code)
 Value cmd_args(void) {
     Array *arr = new_array();
-    // Start from index 1 to skip the executable name (argv[0])
-    // In LLVM compiled code, argv[0] is the executable (e.g., "a.out")
-    // argv[1] and beyond are the actual arguments passed to the program
-    for (int i = 1; i < g_argc; i++) {
+    // Note: set_cmd_args should be called with pre-adjusted argc/argv
+    // that already excludes the executable name and script file
+    for (int i = 0; i < g_argc; i++) {
         int len = strlen(g_argv[i]);
         char *str_copy = malloc(len + 1);
         strcpy(str_copy, g_argv[i]);
