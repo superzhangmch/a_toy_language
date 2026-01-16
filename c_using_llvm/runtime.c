@@ -404,8 +404,10 @@ Value file_read(Value filename) {
     FILE *f = fopen(fname, "rb");
 
     if (f == NULL) {
-        Value result = {TYPE_STRING, (long)strdup("")};
-        return result;
+        char error_msg[512];
+        snprintf(error_msg, sizeof(error_msg), "FileNotFoundError: Cannot open file '%s'", fname);
+        Value msg = {TYPE_STRING, (long)strdup(error_msg)};
+        __raise(msg, 0, "file_read");
     }
 
     fseek(f, 0, SEEK_END);

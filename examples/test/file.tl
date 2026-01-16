@@ -14,3 +14,21 @@ println("output_5", file_size(fn));
 # expect_3: hello
 # expect_4: helloX
 # expect_5: 6
+
+### test file_read exception when file doesn't exist
+try {
+  var content = file_read("non_existent_file.txt");
+  println("output_6", "should not reach here");
+} catch e {
+  println("output_6", "caught exception");
+}
+# expect_6: caught exception
+
+try {
+  var content = file_read("another_missing_file.txt");
+  println("nope");
+} catch e {
+  println("output_7", e);
+}
+# expect_7_has: FileNotFoundError
+# expect_7_has: another_missing_file.txt
