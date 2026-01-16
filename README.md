@@ -61,8 +61,8 @@ if (condition) {
 while (condition) {
     ...  break/continue ...
 }
-for (idx in $st .. $end) { ...  break/continue ... } # there should be spaces surrounding .., like for (i in 1 .. 10), not for (i in 1..10)
-for (idx in $end .. $st) { ...  break/continue ... }
+for (idx = $st .. $end) { ...  break/continue ... } # there should be spaces surrounding .., like for (i = 1 .. 10), not for (i = 1..10)
+for (idx = $end .. $st) { ...  break/continue ... }
 
 # 遍历
 for (key => val in $dict) {

@@ -9,6 +9,7 @@
 #include "interpreter.h"
 #include "core/preprocess.h"
 #include "gc.h"
+#include "runtime.h"
 
 extern int yyparse();
 extern FILE *yyin;
@@ -147,16 +148,33 @@ void run_interactive_mode() {
 
         int parse_result = yyparse();
         if (parse_result == 0 && root != NULL) {
-            // Execute the code - catch any runtime errors with setjmp
+            // Execute the code with dual exception handling
+            // This catches BOTH interpreter exceptions AND runtime exceptions (file_read, json_decode, etc.)
+            void *runtime_buf = __try_push_buf();  // Register with runtime exception system
+            int caught_exception = 0;  // 0 = no exception, 1 = interpreter, 2 = runtime
+
             jmp_buf *error_jmp = (jmp_buf*)get_interactive_error_jmpbuf();
             if (setjmp(*error_jmp) == 0) {
-                // Normal execution
-                interpret_interactive(root);
+                // Set up runtime exception handler (catches file_read, json_decode, assert, etc.)
+                if (setjmp(*(jmp_buf*)runtime_buf) == 0) {
+                    // Normal execution
+                    interpret_interactive(root);
+                } else {
+                    // Caught runtime exception (from file_read, json_decode, assert, etc.)
+                    caught_exception = 2;
+                    Value exception = __get_exception();
+                    if (exception.type == TYPE_STRING) {
+                        printf("%s\n", (char*)exception.data);
+                    }
+                }
             } else {
-                // Error occurred, longjmp was called
+                // Caught interpreter exception (from raise statement)
+                caught_exception = 1;
                 // Error message already printed by runtime_error
-                // Just continue to next iteration
             }
+
+            // Clean up runtime exception handler
+            __try_pop();
         } else if (parse_result != 0) {
             printf("Parse error - please try again\n");
         }

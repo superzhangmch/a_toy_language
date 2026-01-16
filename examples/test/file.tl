@@ -17,7 +17,7 @@ println("output_5", file_size(fn));
 
 ### test file_read exception when file doesn't exist
 try {
-  var content = file_read("non_existent_file.txt");
+  var content1 = file_read("non_existent_file.txt");
   println("output_6", "should not reach here");
 } catch e {
   println("output_6", "caught exception");
@@ -25,7 +25,7 @@ try {
 # expect_6: caught exception
 
 try {
-  var content = file_read("another_missing_file.txt");
+  var content2 = file_read("another_missing_file.txt");
   println("nope");
 } catch e {
   println("output_7", e);
